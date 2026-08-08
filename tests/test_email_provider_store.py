@@ -212,6 +212,34 @@ def test_cloudflare_direct_create_does_not_probe_admin_domains():
     assert http_calls == []
 
 
+def test_cloudflare_admin_create_does_not_probe_mailbox_domains():
+    import connectivity
+
+    tcp_calls = []
+    http_calls = []
+    previous_tcp_open = connectivity._tcp_open
+    connectivity._tcp_open = lambda host, port: tcp_calls.append((host, port)) or True
+    try:
+        result = connectivity.check_email_api(
+            "cloudflare",
+            {
+                "cloudflare_api_base": "https://mail.example.com",
+                "cloudflare_auth_mode": "x-admin-auth",
+                "cloudflare_api_key": "test-admin-key",
+                "cloudflare_path_accounts": "/admin/new_address",
+            },
+            lambda *args, **kwargs: http_calls.append((args, kwargs)),
+            lambda *_args, **_kwargs: None,
+        )
+    finally:
+        connectivity._tcp_open = previous_tcp_open
+
+    assert result[1] is True
+    assert "管理员建号模式" in result[2]
+    assert tcp_calls == [("mail.example.com", 443)]
+    assert http_calls == []
+
+
 if __name__ == "__main__":
     test_provider_schema_and_defaults()
     test_secret_masking_preservation_clear_and_private_file()
@@ -219,4 +247,5 @@ if __name__ == "__main__":
     test_connectivity_uses_unsaved_form_and_preserves_saved_secret()
     test_cloudflare_connectivity_uses_configured_port()
     test_cloudflare_direct_create_does_not_probe_admin_domains()
+    test_cloudflare_admin_create_does_not_probe_mailbox_domains()
     print("OK email provider store")

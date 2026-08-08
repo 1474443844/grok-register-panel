@@ -130,25 +130,28 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
             if not accounts_path.startswith("/"):
                 accounts_path = "/" + accounts_path
 
-            direct_create = not cloudflare_provider.is_admin_create_path(accounts_path)
+            admin_create = cloudflare_provider.is_admin_create_path(accounts_path)
+            direct_create = not admin_create
+            admin_header_create = admin_create and auth_mode.lower() == "x-admin-auth"
 
-            if direct_create:
-                # 直建端点不使用管理密钥，即使全局 auth_mode 有值也一样。
-                # 不误探受保护的 domains 端点；POST 建号会产生数据，预检只做 TCP。
+            if direct_create or admin_header_create:
+                # 直建端点不使用管理密钥；/admin/new_address 则使用
+                # x-admin-auth，而 domains 通常要邮箱 JWT。两者都不能用 domains
+                # 做无副作用鉴权预检；POST 建号会产生数据，因此只做 TCP。
                 parsed = urlparse(base)
                 host = parsed.hostname
                 if host:
                     port = parsed.port or (443 if parsed.scheme == "https" else 80)
                     if not _tcp_open(host, port):
                         return "邮箱API", False, f"Cloudflare 服务不可达: {host}:{port}"
-                note = ""
+                mode_label = "管理员建号" if admin_header_create else "直建"
                 return (
                     "邮箱API",
                     True,
-                    f"Cloudflare 直建模式可用（建号端点 {accounts_path}）",
+                    f"Cloudflare {mode_label}模式可用（建号端点 {accounts_path}）",
                 )
 
-            # 管理建号模式：检查 domains 鉴权是否正确。
+            # 其他鉴权模式：检查 domains 鉴权是否正确。
             path = str(config.get("cloudflare_path_domains", "/api/domains") or "/api/domains")
             if not path.startswith("/"):
                 path = "/" + path
