@@ -13,6 +13,7 @@ tests=(
   tests/test_runtime_platform.py
   tests/test_sso_recovery.py
   tests/test_bfs_detect.py
+  tests/test_static_asset_cache.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py
@@ -43,7 +44,10 @@ done
   run_batch_headless.py \
   run_until_100.py \
   sso_to_auth_json.py \
-  scripts/check_bfs.py
+  scripts/check_bfs.py \
+  static_asset_cache.py \
+  run_batch_headless_static_cache.py \
+  run_until_100_static_cache.py
 
 bash -n scripts/*.sh
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
