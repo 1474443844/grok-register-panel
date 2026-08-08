@@ -13,6 +13,8 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 
 **仓库：** https://github.com/lij768423-svg/grok-register-panel
 
+**项目主页 / 自用面板：** http://100.102.32.24:8792/（仅 Tailscale 内网可达）
+
 </div>
 
 ---
@@ -142,6 +144,9 @@ cp config.example.json config.json
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
 | `EMAIL_PROVIDER_CONFIG_FILE` | `./config.json` | 面板邮箱服务配置文件；保存时保持 `0600` |
 | `EMAIL_DOMAIN_POOL_STATE_FILE` | `./log/email_domain_pool.json` | 邮箱域名池状态与规则，文件权限 `0600` |
+| `GROK_STATIC_ASSET_CACHE` | 空 | 设为 `1` 时启用可选共享静态资源缓存 |
+| `GROK_STATIC_CACHE_DIR` | `./log/static-asset-cache` | 静态缓存目录，文件权限 `0700` |
+| `GROK_STATIC_CACHE_MAX_MB` | `1024` | 静态缓存上限（MB），最低 `32` |
 
 生成 token 示例：
 
@@ -175,6 +180,20 @@ python webui/monitor.py
 4. 需要多出口时打开顶部 **代理池**，导入代理并等待检测完成
 5. 打开顶部 **邮箱服务**，选择 provider、填写对应参数，保存后执行一次连接测试
 6. 需要多个自有收信域名轮换时，再展开 **域名轮换 · 高级设置** 导入域名并保存规则
+
+### 可选静态资源缓存
+
+默认注册入口不会启用静态缓存。需要在重复的浏览器批次之间复用 JS/CSS/字体/图片时，在标准启动命令上增加环境变量：
+
+```bash
+GROK_STATIC_ASSET_CACHE=1 \
+GROK_STATIC_CACHE_DIR="$PWD/log/static-asset-cache" \
+  xvfb-run -a python -u run_batch_headless.py 1 1
+```
+
+也可直接使用兼容入口 `run_batch_headless_static_cache.py` 或 `run_until_100_static_cache.py`。
+
+缓存只处理 GET 静态资源；文档、XHR/fetch、WebSocket、Turnstile 和账号相关请求始终直连。
 
 也可在控制台手动写入：
 

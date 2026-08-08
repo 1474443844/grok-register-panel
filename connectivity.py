@@ -130,11 +130,11 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
             if not accounts_path.startswith("/"):
                 accounts_path = "/" + accounts_path
 
-            auth_is_none = auth_mode.lower() == "none"
+            direct_create = not cloudflare_provider.is_admin_create_path(accounts_path)
 
-            if auth_is_none:
-                # 直建模式：建号走 /new_address，不依赖 domains 端点。
-                # 不发 HTTP 请求到 domains（避免 401 困扰），只验证服务器是否在线。
+            if direct_create:
+                # 直建端点不使用管理密钥，即使全局 auth_mode 有值也一样。
+                # 不误探受保护的 domains 端点；POST 建号会产生数据，预检只做 TCP。
                 parsed = urlparse(base)
                 host = parsed.hostname
                 if host:
@@ -148,7 +148,7 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
                     f"Cloudflare 直建模式可用（建号端点 {accounts_path}）",
                 )
 
-            # auth_mode != none：检查 domains 鉴权是否正确
+            # 管理建号模式：检查 domains 鉴权是否正确。
             path = str(config.get("cloudflare_path_domains", "/api/domains") or "/api/domains")
             if not path.startswith("/"):
                 path = "/" + path
