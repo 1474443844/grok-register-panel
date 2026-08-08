@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix BFS unknown-token handling, stale metadata precedence, merged auth scanning, and CLI config loading; include BFS tests in release checks.
 - Add **JWT `bfs` claim detection**: register/OAuth path inspects access_token (and SSO) for the `bfs` key; flagged accounts go to `accounts/sso_bfs_flagged.txt` and CPA records get `bfs` / `bfs_value` metadata.
 - Panel **BFS 检测** card + `/api/bfs` / `/api/bfs/scan` / `/api/bfs/check`; batch CLI `scripts/check_bfs.py` and `sso_to_auth_json.py --check-bfs-dir`.
 - Config knobs: `bfs_check`, `bfs_skip_cpa`, `bfs_disable_cpa` (see `config.example.json`).

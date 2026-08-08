@@ -1027,7 +1027,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         bfs_check = config.get("bfs_check", True)
         if isinstance(bfs_check, str):
             bfs_check = bfs_check.strip().lower() not in ("0", "false", "no", "off")
-        bfs_info = {"has_bfs": False, "bfs": None, "source": ""}
+        bfs_info = {"ok": False, "has_bfs": False, "bfs": None, "source": ""}
         if bfs_check:
             bfs_info = _s2cpa.inspect_token_bundle_bfs(
                 access_token=str(token.get("access_token") or ""),
@@ -1035,15 +1035,21 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
                 id_token=str(token.get("id_token") or ""),
                 refresh_token=str(token.get("refresh_token") or ""),
             )
-            if bfs_info.get("has_bfs"):
+            skip_cpa = config.get("bfs_skip_cpa", False)
+            if isinstance(skip_cpa, str):
+                skip_cpa = skip_cpa.strip().lower() in ("1", "true", "yes", "on")
+            if not bfs_info.get("ok"):
+                _cpa_log("JWT bfs 检测: unknown（无法解码 token）")
+                if skip_cpa:
+                    _append_sso_pending(email, sso, log_callback=log_callback)
+                    _cpa_log("bfs_skip_cpa=true，未知状态不写入 CPA/Grok2API，已进入待重转队列")
+                    return False
+            elif bfs_info.get("has_bfs"):
                 detail = (
                     f"bfs={bfs_info.get('bfs')!r} source={bfs_info.get('source') or '-'}"
                 )
                 _cpa_log(f"JWT bfs 标记: {detail}")
                 _append_sso_bfs_flagged(email, sso, detail, log_callback=log_callback)
-                skip_cpa = config.get("bfs_skip_cpa", False)
-                if isinstance(skip_cpa, str):
-                    skip_cpa = skip_cpa.strip().lower() in ("1", "true", "yes", "on")
                 if skip_cpa:
                     _cpa_log("bfs_skip_cpa=true，跳过 CPA/Grok2API 写入")
                     try:
@@ -1062,7 +1068,13 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             else:
                 _cpa_log("JWT bfs 检测: clean")
 
-        record = _s2cpa.token_to_cpa_record(token, email=email, sso=sso)
+        record = _s2cpa.token_to_cpa_record(
+            token,
+            email=email,
+            sso=sso,
+            bfs_info=bfs_info if bfs_check else None,
+            check_bfs=bool(bfs_check),
+        )
         ap = _s2cpa.decode_jwt_payload(record.get("access_token", ""))
         ref = ap.get("referrer")
         if ref:
@@ -1070,7 +1082,7 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
         disable_bfs = config.get("bfs_disable_cpa", False)
         if isinstance(disable_bfs, str):
             disable_bfs = disable_bfs.strip().lower() in ("1", "true", "yes", "on")
-        if disable_bfs and record.get("bfs"):
+        if disable_bfs and record.get("bfs") is True:
             record["disabled"] = True
             _cpa_log("bfs 账号已标记 disabled=true")
         wrote_ok = False

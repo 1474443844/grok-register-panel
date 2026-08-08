@@ -21,7 +21,7 @@ from sso_to_auth_json import (  # noqa: E402
 )
 
 
-def _jwt(payload: dict) -> str:
+def _jwt(payload: object) -> str:
     def b64(obj) -> str:
         raw = json.dumps(obj, separators=(",", ":")).encode()
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
@@ -49,6 +49,18 @@ def test_bfs_key_presence_not_truthiness():
     assert z["bfs"] == 0
 
 
+def test_non_object_and_empty_payloads_are_safe():
+    empty = _jwt({})
+    empty_info = inspect_jwt_bfs(empty)
+    assert empty_info["ok"] is True
+    assert empty_info["has_bfs"] is False
+
+    malformed_shape = _jwt([])
+    shape_info = inspect_jwt_bfs(malformed_shape)
+    assert shape_info["ok"] is False
+    assert shape_info["has_bfs"] is False
+
+
 def test_bundle_prefers_access_token_bfs():
     sso = _jwt({"sub": "sso-user"})
     access = _jwt({"sub": "acc-user", "bfs": 2, "referrer": "grok-build"})
@@ -56,6 +68,30 @@ def test_bundle_prefers_access_token_bfs():
     assert info["has_bfs"] is True
     assert info["source"] == "access_token"
     assert info["bfs"] == 2
+
+
+def test_unknown_is_not_recorded_as_clean_and_cached_metadata_is_stale():
+    unknown = inspect_token_bundle_bfs(access_token="opaque-access-token")
+    assert unknown["ok"] is False
+    assert unknown["has_bfs"] is False
+
+    record = token_to_cpa_record(
+        {"access_token": "opaque-access-token"}, email="unknown@example.com"
+    )
+    assert record["bfs"] is None
+    assert record["bfs_checked"] is False
+    assert record["bfs_status"] == "unknown"
+
+    current_flagged = _jwt({"sub": "current", "bfs": 2})
+    cached_clean = {
+        "access_token": current_flagged,
+        "bfs": False,
+        "bfs_checked": True,
+    }
+    current = inspect_cpa_record_bfs(cached_clean)
+    assert current["ok"] is True
+    assert current["has_bfs"] is True
+    assert current["source"] == "access_token"
 
 
 def test_cpa_record_annotation():
@@ -99,12 +135,24 @@ def test_scan_auth_dir():
         (root / "xai-clean@example.com.json").write_text(
             json.dumps(clean), encoding="utf-8"
         )
+        (root / "auth.json").write_text(
+            json.dumps(
+                {
+                    "https://auth.x.ai::client": {
+                        "key": _jwt({"sub": "merged", "bfs": 2}),
+                        "email": "merged@example.com",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         summary = scan_cpa_auth_dir_bfs(root, include_clean=True)
-        assert summary["total"] == 2
-        assert summary["bfs_count"] == 1
+        assert summary["total"] == 3
+        assert summary["bfs_count"] == 2
         assert summary["clean_count"] == 1
-        assert summary["bfs_rate"] == 50.0
-        assert summary["bfs_value_dist"].get("2") == 1
+        assert summary["bfs_rate"] == 66.67
+        assert summary["bfs_value_dist"].get("2") == 2
+        assert any(item["file"].startswith("auth.json#") for item in summary["items"])
 
 
 def test_apply_bfs_and_record_field_shortcut():
@@ -121,7 +169,9 @@ def test_apply_bfs_and_record_field_shortcut():
 
 if __name__ == "__main__":
     test_bfs_key_presence_not_truthiness()
+    test_non_object_and_empty_payloads_are_safe()
     test_bundle_prefers_access_token_bfs()
+    test_unknown_is_not_recorded_as_clean_and_cached_metadata_is_stale()
     test_cpa_record_annotation()
     test_scan_auth_dir()
     test_apply_bfs_and_record_field_shortcut()
