@@ -56,7 +56,7 @@ def _resolve_auth_dirs() -> list[Path]:
             if not raw:
                 continue
             p = Path(raw)
-            if not p.is_abs():
+            if not p.is_absolute():
                 p = base / p
             _add(p)
     return dirs

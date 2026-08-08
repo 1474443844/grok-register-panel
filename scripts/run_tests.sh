@@ -13,6 +13,7 @@ tests=(
   tests/test_runtime_platform.py
   tests/test_sso_recovery.py
   tests/test_bfs_detect.py
+  tests/test_bfs_ops.py
   tests/test_static_asset_cache.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
@@ -45,6 +46,7 @@ done
   run_until_100.py \
   sso_to_auth_json.py \
   scripts/check_bfs.py \
+  webui/bfs_ops.py \
   static_asset_cache.py \
   run_batch_headless_static_cache.py \
   run_until_100_static_cache.py
