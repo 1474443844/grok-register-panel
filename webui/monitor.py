@@ -55,6 +55,7 @@ try:
         write_pid_file,
     )
     from webui.recovery_ops import recovery_status, start_recovery, stop_recovery
+    from webui.bfs_ops import bfs_status, check_token_text, run_bfs_scan
     from webui.security_utils import (
         check_token_optional_read,
         expected_token,
@@ -91,6 +92,7 @@ except ImportError:  # running as script from webui/
         write_pid_file,
     )
     from recovery_ops import recovery_status, start_recovery, stop_recovery  # type: ignore
+    from bfs_ops import bfs_status, check_token_text, run_bfs_scan  # type: ignore
     from security_utils import (  # type: ignore
         check_token_optional_read,
         expected_token,
@@ -127,6 +129,7 @@ RE_DOMAIN = re.compile(r"\[-\] 域名拒绝")
 RE_SKIP = re.compile(r"\[-\] 卡住跳过")
 RE_BOT0 = re.compile(r"botFlagSource=0")
 RE_BOT1 = re.compile(r"botFlagSource=1")
+RE_BFS = re.compile(r"JWT bfs 标记|bfs=yes|kind=bfs_flagged|has_bfs")
 RE_EMAIL_OK = re.compile(r"\[\+\] 注册成功(?:（[^）]*）)?:\s*(\S+)")
 RE_FAIL_KIND = re.compile(r"\[-\] 失败 \[([^\]]+)\]:\s*(.*)")
 RE_WORKER = re.compile(r"\[W(\d+)\]")
@@ -283,7 +286,7 @@ def parse_log(path, max_tail=400_000):
         text = f.read().decode("utf-8", errors="replace")
 
     lines = text.splitlines()
-    ok = fail = domain = skip = bot0 = bot1 = 0
+    ok = fail = domain = skip = bot0 = bot1 = bfs_hits = 0
     count = workers = None
     ended = None
     recent_ok = []
@@ -332,6 +335,8 @@ def parse_log(path, max_tail=400_000):
             bot0 += 1
         if RE_BOT1.search(line):
             bot1 += 1
+        if RE_BFS.search(line):
+            bfs_hits += 1
 
     last_lines = lines[-40:]
     if size > max_tail:
@@ -346,6 +351,7 @@ def parse_log(path, max_tail=400_000):
         fail = gcount(r"\[-\] 失败")
         bot0 = gcount("botFlagSource=0")
         bot1 = gcount("botFlagSource=1")
+        bfs_hits = gcount("JWT bfs 标记") + gcount("bfs_flagged")
 
     return {
         "log": path.name,
@@ -360,6 +366,7 @@ def parse_log(path, max_tail=400_000):
         "skip": skip,
         "bot0": bot0,
         "bot1": bot1,
+        "bfs": bfs_hits,
         "ended": ended,
         "fail_kinds": fail_kinds,
         "worker_ok": worker_ok,
@@ -1873,6 +1880,10 @@ HTML = r"""<!DOCTYPE html>
             <summary>出现 policy=deny 或注册风控</summary>
             <div class="faq-answer">该账号已被注册风控拒绝，不要反复重转同一 SSO。先更换质量更好的出口并给 IP 冷却时间，邮箱优先使用稳定的子域名，并发先保持 2-3。</div>
           </details>
+          <details class="faq-item" data-faq-item data-search="bfs jwt claim access_token 标记 flagged 风控 检测 scan">
+            <summary>什么是 bfs，和 botFlagSource 有何不同</summary>
+            <div class="faq-answer"><code>bfs</code> 是 xAI access_token / SSO JWT 里的风险 claim：payload 里<strong>出现该字段</strong>即视为标记（常见值 2）。它与 grok.com 页面的 <code>botFlagSource</code> / <code>policy=deny</code> 独立。注册换 token 后会自动检测；也可在控制台“BFS 检测”扫描 CPA 目录，导出 <code>log/bfs_flagged.jsonl</code>。配置 <code>bfs_skip_cpa</code> 可跳过入库，<code>bfs_disable_cpa</code> 可写 disabled。</div>
+          </details>
           <details class="faq-item" data-faq-item data-search="卡住 浏览器 启动失败 turnstile 资料页 空页 并发 camoufox">
             <summary>注册卡在验证码、资料页或浏览器启动</summary>
             <div class="faq-answer">先从失败分类和日志尾部确认具体阶段。连续浏览器启动失败时降低并发，并检查是否执行过 <code>camoufox fetch</code>；资料页失败也可能是 Turnstile 未通过。</div>
@@ -2112,6 +2123,29 @@ HTML = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="msg" id="recovery-msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card panel" aria-labelledby="bfs-title">
+    <div class="section-head">
+      <h2 id="bfs-title">BFS 检测</h2>
+      <span class="section-meta mono" id="bfs-status">JWT claim</span>
+    </div>
+    <p style="margin:0 0 10px;color:var(--muted);font-size:13px;line-height:1.5">
+      解码 CPA / Grok2API auth 中的 access_token，检查是否含 <code>bfs</code> claim（与 botFlagSource 独立）。
+      注册换 token 后会自动检测并写入 <code>accounts/sso_bfs_flagged.txt</code>。
+    </p>
+    <div class="chips" id="bfs-kpis"></div>
+    <div class="button-group" style="margin-top:10px">
+      <button id="bfs-scan" onclick="runBfsScan()">扫描 auth 目录</button>
+      <button onclick="refreshBfs()">刷新状态</button>
+    </div>
+    <div class="msg" id="bfs-msg" role="status" aria-live="polite"></div>
+    <div class="table-scroll" style="margin-top:10px;max-height:220px">
+      <table>
+        <thead><tr><th>邮箱</th><th>bfs</th><th>来源</th><th>文件</th></tr></thead>
+        <tbody id="bfs-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <div class="three panel-gap">
@@ -2903,6 +2937,59 @@ async function stopRecovery() {
     await refreshRecovery();
   } catch (e) { setMsg("recovery-msg", String(e.message || e), "err"); }
 }
+function renderBfs(data) {
+  data = data || {};
+  const last = data.last_report || {};
+  const rj = data.results_jsonl || {};
+  const el = document.getElementById("bfs-kpis");
+  if (!el) return;
+  el.innerHTML = [
+    ["上次扫描", last.total ?? "--", ""],
+    ["BFS", last.bfs_count ?? "--", (last.bfs_count || 0) > 0 ? "warn" : "ok"],
+    ["Clean", last.clean_count ?? "--", "ok"],
+    ["比率", last.bfs_rate != null ? (last.bfs_rate + "%") : "--", (last.bfs_rate || 0) > 0 ? "warn" : ""],
+    ["队列文件", data.flagged_file_count ?? 0, (data.flagged_file_count || 0) > 0 ? "warn" : ""],
+    ["jsonl bfs", rj.bfs ?? 0, (rj.bfs || 0) > 0 ? "warn" : ""],
+  ].map(([label, value, cls]) => `<div class="chip"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`).join("");
+  const st = document.getElementById("bfs-status");
+  if (st) st.textContent = last.scanned_at ? ("扫描 " + last.scanned_at) : "尚未扫描";
+  const body = document.getElementById("bfs-body");
+  if (body && Array.isArray(data.items)) {
+    const rows = data.items.filter(it => it.has_bfs).slice(0, 50);
+    body.innerHTML = rows.length ? rows.map(it =>
+      `<tr><td class="mono">${esc(it.email || "-")}</td><td class="warn">${esc(it.bfs != null ? it.bfs : "yes")}</td><td class="mono">${esc(it.source || "")}</td><td class="mono">${esc(it.file || "")}</td></tr>`
+    ).join("") : '<tr><td colspan="4" style="color:var(--muted)">无 bfs 记录（先点扫描）</td></tr>';
+  }
+}
+async function refreshBfs(authHelp = false) {
+  try {
+    const data = await api("/api/bfs?_=" + Date.now(), { authHelp });
+    renderBfs(data);
+  } catch (e) {
+    const st = document.getElementById("bfs-status");
+    if (st) st.textContent = String(e.message || e).includes("令牌") ? "等待令牌" : "检查失败";
+  }
+}
+async function runBfsScan() {
+  setMsg("bfs-msg", "正在扫描 CPA / Grok2API auth …", "");
+  const btn = document.getElementById("bfs-scan");
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api("/api/bfs/scan", { method: "POST", body: JSON.stringify({}) });
+    renderBfs(Object.assign({}, data, { last_report: data, items: data.items || [] }));
+    setMsg("bfs-msg",
+      "完成 total=" + (data.total ?? 0) +
+      " bfs=" + (data.bfs_count ?? 0) +
+      " clean=" + (data.clean_count ?? 0) +
+      " rate=" + (data.bfs_rate ?? 0) + "%" +
+      (data.export_path ? (" → " + data.export_path) : ""),
+      "ok");
+  } catch (e) {
+    setMsg("bfs-msg", String(e.message || e), "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 function renderBlacklist(bl, upd) {
   bl = bl || {};
   upd = upd || {};
@@ -3000,6 +3087,7 @@ function render(d) {
     ["本批失败", d.fail ?? 0, "fail", d.success_rate != null ? "成功率 " + d.success_rate + "%" : "暂无数据"],
     ["CPA 总量", d.cpa ?? "--", "accent", "较基线 " + (d.cpa_delta != null ? ((Number(d.cpa_delta) >= 0 ? "+" : "") + d.cpa_delta) : "--")],
     ["正常 / 风控", (d.bot0 ?? 0) + " / " + (d.bot1 ?? 0), (d.bot1 ?? 0) > 0 ? "warn" : "ok", "注册结果采样"],
+    ["BFS 标记", d.bfs ?? 0, (d.bfs ?? 0) > 0 ? "warn" : "ok", "JWT claim 命中"],
     ["黑名单 ASN", (d.blacklist && d.blacklist.count) ?? "--", "accent", "更新错误 " + ((d.blacklist_update && d.blacklist_update.error_count) ?? 0)],
     ["预计完成", d.ended ? "已完成" : (d.eta || "--"), "", "并发 " + (d.workers ?? "--") + (d.rate_per_min != null ? " / " + d.rate_per_min + " 每分钟" : "")],
   ];
@@ -3056,6 +3144,8 @@ setInterval(refresh, 2000);
 refreshStats(false);
 refreshRecovery();
 setInterval(refreshRecovery, 5000);
+refreshBfs();
+setInterval(refreshBfs, 15000);
 setInterval(() => {
   if (document.body.classList.contains("proxy-view-open")) refreshProxies(false);
   if (document.body.classList.contains("domain-view-open")) refreshEmailDomains(false);
@@ -3170,7 +3260,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/health":
             self._json(200, {"ok": True})
             return
-        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains"):
+        if u.path in ("/api/status", "/api/blacklist", "/api/stats", "/api/control", "/api/recovery", "/api/proxies", "/api/email-provider", "/api/email-domains", "/api/bfs"):
             if not self._require_read():
                 return
         if u.path == "/api/status":
@@ -3201,6 +3291,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, recovery_status())
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+            return
+        if u.path == "/api/bfs":
+            try:
+                self._json(200, bfs_status())
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
             return
         if u.path == "/api/proxies":
             try:
@@ -3272,6 +3368,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, stop_recovery())
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+            return
+        if u.path == "/api/bfs/scan":
+            try:
+                limit = int((body or {}).get("limit") or 0)
+                include_clean = bool((body or {}).get("include_clean"))
+                result = run_bfs_scan(limit=limit, include_clean=include_clean)
+                self._json(200, result)
+            except Exception as e:
+                self._json(500, {"ok": False, "error": redact_log_line(str(e))})
+            return
+        if u.path == "/api/bfs/check":
+            try:
+                token = str((body or {}).get("token") or "").strip()
+                if not token:
+                    self._json(400, {"ok": False, "error": "token required"})
+                    return
+                self._json(200, check_token_text(token))
+            except Exception as e:
+                self._json(400, {"ok": False, "error": redact_log_line(str(e))})
             return
         if u.path == "/api/proxies/import":
             try:

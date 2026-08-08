@@ -28,8 +28,9 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 反检测浏览器 | [Camoufox](https://camoufox.com/)（Gecko 层指纹） |
 | 出口预检 | 启动前解析出口 IP / ASN，命中黑名单直接换口 |
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
+| **BFS 检测** | 解码 access_token / SSO JWT，检查是否含 `bfs` claim（与 botFlag 独立）；注册后自动标记，面板可批量扫描 CPA |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
-| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率和账号补录；操作 API 需 `MONITOR_TOKEN` |
+| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、账号补录和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
@@ -306,6 +307,32 @@ python sso_to_auth_json.py \
   --report-json log/recovery_report.json
 ```
 
+### BFS 检测（JWT claim）
+
+xAI 部分 access_token 的 payload 会带 **`bfs` 字段**（常见值 `2`）。**只要 key 存在即视为标记**，与 grok.com 的 `botFlagSource` / `policy=deny` 不是同一信号。
+
+| 能力 | 说明 |
+|------|------|
+| 注册后自动检测 | SSO→OAuth 换 token 后解码 JWT；命中写入 `accounts/sso_bfs_flagged.txt`，CPA 记录带 `bfs` / `bfs_value` |
+| 面板 | 「BFS 检测」卡片：扫描 `cpa_auth` / `grok2api_auth`，导出 `log/bfs_flagged.jsonl` |
+| CLI | `python scripts/check_bfs.py` 或 `python sso_to_auth_json.py --check-bfs-dir cpa_auth` |
+
+`config.json` 可选：
+
+| 字段 | 默认 | 含义 |
+|------|------|------|
+| `bfs_check` | `true` | 换 token 后检测 |
+| `bfs_skip_cpa` | `false` | 命中 bfs 时跳过 CPA/Grok2API 写入 |
+| `bfs_disable_cpa` | `false` | 命中仍写入，但 `disabled: true` |
+
+```bash
+# 扫描本地 CPA 目录
+python scripts/check_bfs.py --dir cpa_auth --export log/bfs_flagged.jsonl
+
+# 单 token 诊断（不回显原文）
+python scripts/check_bfs.py --token 'eyJ...'
+```
+
 ## 工程实践备忘（非教程承诺）
 
 以下为社区常见踩坑方向，**环境差异大，仅供参考**：
@@ -313,9 +340,10 @@ python sso_to_auth_json.py \
 1. 邮箱：二级域名临时邮往往比批发一级域 / 大盘 Outlook·Google 更省事  
 2. 出口：质量与冷却窗口影响大；同一出口短时间打太满容易抬失败率  
 3. 风控字段：服务端 deny 后宜尽早结束 OAuth 路径  
-4. 并发建议从 2～3 起跳，过高易空页、Turnstile 卡住、代理打满  
-5. 「资料填写失败」有时是资料页人机未过，不一定是姓名密码写不进  
-6. 链式代理在客户端配，不在注册机 Python 里写死  
+4. JWT `bfs`：与 botFlag 分开统计；入库前可用面板/CLI 批量扫 CPA  
+5. 并发建议从 2～3 起跳，过高易空页、Turnstile 卡住、代理打满  
+6. 「资料填写失败」有时是资料页人机未过，不一定是姓名密码写不进  
+7. 链式代理在客户端配，不在注册机 Python 里写死  
 
 ## 目录结构
 
@@ -337,10 +365,13 @@ python sso_to_auth_json.py \
 │   ├── email_domain_store.py  # 邮箱域名池、拒绝阈值与轮换状态
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
+│   ├── bfs_ops.py             # JWT bfs 扫描 / 面板接口
 │   └── blacklist_ops.py       # 面板黑名单接口
 ├── email_providers/
-├── tests/                     # 结构 / 脱敏 / chdir 冒烟
-├── scripts/                   # xvfb 辅助脚本
+├── tests/                     # 结构 / 脱敏 / bfs / chdir 冒烟
+├── scripts/
+│   ├── check_bfs.py           # 批量 bfs 扫描
+│   └── …                      # xvfb 等辅助
 ├── config.example.json
 ├── proxies.example.txt
 ├── requirements.txt

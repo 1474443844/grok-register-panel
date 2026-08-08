@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add **JWT `bfs` claim detection**: register/OAuth path inspects access_token (and SSO) for the `bfs` key; flagged accounts go to `accounts/sso_bfs_flagged.txt` and CPA records get `bfs` / `bfs_value` metadata.
+- Panel **BFS 检测** card + `/api/bfs` / `/api/bfs/scan` / `/api/bfs/check`; batch CLI `scripts/check_bfs.py` and `sso_to_auth_json.py --check-bfs-dir`.
+- Config knobs: `bfs_check`, `bfs_skip_cpa`, `bfs_disable_cpa` (see `config.example.json`).
 - Supervise headless batches and automatically resume remaining task slots after a Playwright/Camoufox driver crash or stall.
 - Persist batch slot progress atomically so completed accounts are not repeated during recovery.
 - Make panel process management and batch launch platform-aware: `psutil` discovery, Linux auto-Xvfb, macOS direct launch, Windows virtualenv paths, and actionable missing-procfs errors.

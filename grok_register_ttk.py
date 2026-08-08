@@ -342,11 +342,14 @@ def record_register_result(
     worker: str = "",
     bot_flag=None,
     risk=None,
+    bfs=None,
+    bfs_value=None,
     log_callback=None,
 ) -> dict:
     """记录单次注册结果 + 出口 IP（控制台一行 + jsonl）。
 
     status: ok / fail / risk / sso_timeout / browser / other
+    bfs: True/False/None — JWT claim 检测（与 botFlagSource 不同）
     """
     import json as _json
     from datetime import datetime, timezone
@@ -392,11 +395,18 @@ def record_register_result(
         "port": port,
         "bot_flag": bot_flag,
         "risk": risk,
+        "bfs": bfs,
+        "bfs_value": bfs_value,
     }
+    bfs_txt = "-"
+    if bfs is True:
+        bfs_txt = f"yes:{bfs_value}" if bfs_value is not None else "yes"
+    elif bfs is False:
+        bfs_txt = "clean"
     line = (
         f"[结果] status={status} ip={exit_ip or '?'} port={port or '?'} "
         f"email={mask_email(email) if email else '-'} kind={kind or '-'} bot={bot_flag if bot_flag is not None else '-'} "
-        f"risk={risk if risk is not None else '-'}"
+        f"risk={risk if risk is not None else '-'} bfs={bfs_txt}"
     )
     if log_callback:
         try:
@@ -855,6 +865,19 @@ def _append_sso_risk_rejected(email: str, sso: str, details: str, log_callback=N
             log_callback(f"[CPA] 保存注册风控拒绝记录失败: {exc}")
 
 
+def _append_sso_bfs_flagged(email: str, sso: str, details: str, log_callback=None):
+    """保存 JWT bfs 标记账号（access_token/sso 含 bfs claim）。"""
+    try:
+        path = accounts_side_file("sso_bfs_flagged.txt")
+        safe_details = re.sub(r"[\r\n\t]+", " ", str(details or "")).strip()
+        append_private_text(path, f"{email}----{sso}----{safe_details}\n")
+        if log_callback:
+            log_callback(f"[CPA] 已保存 bfs 标记记录 → {path}")
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[CPA] 保存 bfs 标记记录失败: {exc}")
+
+
 def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
     """检查新账号是否被注册风控拒绝；无法判定时继续原有 OAuth 路径。"""
     if not config.get("cpa_auto_add", False):
@@ -999,11 +1022,57 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             _cpa_log("换 token 失败；SSO 已在 accounts 文件，稍后可重转")
             _append_sso_pending(email, sso, log_callback=log_callback)
             return False
+
+        # JWT bfs 检测（与 botFlagSource 独立；key 存在即标记）
+        bfs_check = config.get("bfs_check", True)
+        if isinstance(bfs_check, str):
+            bfs_check = bfs_check.strip().lower() not in ("0", "false", "no", "off")
+        bfs_info = {"has_bfs": False, "bfs": None, "source": ""}
+        if bfs_check:
+            bfs_info = _s2cpa.inspect_token_bundle_bfs(
+                access_token=str(token.get("access_token") or ""),
+                sso=sso,
+                id_token=str(token.get("id_token") or ""),
+                refresh_token=str(token.get("refresh_token") or ""),
+            )
+            if bfs_info.get("has_bfs"):
+                detail = (
+                    f"bfs={bfs_info.get('bfs')!r} source={bfs_info.get('source') or '-'}"
+                )
+                _cpa_log(f"JWT bfs 标记: {detail}")
+                _append_sso_bfs_flagged(email, sso, detail, log_callback=log_callback)
+                skip_cpa = config.get("bfs_skip_cpa", False)
+                if isinstance(skip_cpa, str):
+                    skip_cpa = skip_cpa.strip().lower() in ("1", "true", "yes", "on")
+                if skip_cpa:
+                    _cpa_log("bfs_skip_cpa=true，跳过 CPA/Grok2API 写入")
+                    try:
+                        record_register_result(
+                            "ok",
+                            email or "",
+                            kind="bfs_flagged",
+                            detail=detail,
+                            bfs=True,
+                            bfs_value=bfs_info.get("bfs"),
+                            log_callback=log_callback,
+                        )
+                    except Exception:
+                        pass
+                    return False
+            else:
+                _cpa_log("JWT bfs 检测: clean")
+
         record = _s2cpa.token_to_cpa_record(token, email=email, sso=sso)
         ap = _s2cpa.decode_jwt_payload(record.get("access_token", ""))
         ref = ap.get("referrer")
         if ref:
             _cpa_log(f"access_token referrer={ref!r}")
+        disable_bfs = config.get("bfs_disable_cpa", False)
+        if isinstance(disable_bfs, str):
+            disable_bfs = disable_bfs.strip().lower() in ("1", "true", "yes", "on")
+        if disable_bfs and record.get("bfs"):
+            record["disabled"] = True
+            _cpa_log("bfs 账号已标记 disabled=true")
         wrote_ok = False
         if auth_dir:
             try:
@@ -1030,6 +1099,20 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None) -> bool:
             _cpa_log("token 已换出但 CPA/Grok2API 均未写入成功")
             _append_sso_pending(email, sso, log_callback=log_callback)
             return False
+        # 成功写入后把 bfs 记入结果日志（ok 状态由上层注册成功路径再记一次时可能覆盖；此处补一条细节）
+        if bfs_check and bfs_info.get("has_bfs"):
+            try:
+                record_register_result(
+                    "ok",
+                    email or "",
+                    kind="bfs_flagged",
+                    detail=f"bfs={bfs_info.get('bfs')!r} written",
+                    bfs=True,
+                    bfs_value=bfs_info.get("bfs"),
+                    log_callback=log_callback,
+                )
+            except Exception:
+                pass
         return True
     except Exception as exc:
         _cpa_log(f"直出失败: {redact_sensitive_log_line(str(exc))}")

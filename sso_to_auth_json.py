@@ -200,6 +200,277 @@ def decode_jwt_payload(token: str) -> dict:
         return {}
 
 
+def inspect_jwt_bfs(token: str) -> dict:
+    """Detect xAI JWT risk claim ``bfs`` by key presence (not truthiness).
+
+    Clean tokens simply omit the claim. Flagged tokens typically carry
+    ``bfs: 2`` (value may vary; presence alone is the signal).
+    Distinct from grok.com ``botFlagSource`` / registration policy deny.
+    """
+    raw = str(token or "").strip()
+    if raw.startswith("sso="):
+        raw = raw[4:].strip()
+    # Nested JSON blob (encrypted_primary decode, or full OAuth response)
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            for key in ("access_token", "token", "sso", "id_token", "key"):
+                nested = str(obj.get(key) or "").strip()
+                if nested.count(".") >= 2:
+                    raw = nested
+                    break
+    claims = decode_jwt_payload(raw) if raw.count(".") >= 2 else {}
+    has = isinstance(claims, dict) and ("bfs" in claims)
+    return {
+        "ok": bool(claims),
+        "has_bfs": has,
+        "bfs": claims.get("bfs") if has else None,
+        "tier": claims.get("tier"),
+        "sub": str(claims.get("sub") or claims.get("principal_id") or "")[:48],
+        "exp": claims.get("exp"),
+        "referrer": claims.get("referrer"),
+        "claim_keys": sorted(str(k) for k in claims.keys()) if claims else [],
+    }
+
+
+def inspect_token_bundle_bfs(
+    *,
+    access_token: str = "",
+    sso: str = "",
+    id_token: str = "",
+    refresh_token: str = "",
+) -> dict:
+    """Check OAuth / SSO bundle; prefer access_token, fall back to sso/id/refresh."""
+    sources: list[tuple[str, str]] = [
+        ("access_token", str(access_token or "").strip()),
+        ("sso", str(sso or "").strip()),
+        ("id_token", str(id_token or "").strip()),
+        ("refresh_token", str(refresh_token or "").strip()),
+    ]
+    result = {
+        "ok": False,
+        "has_bfs": False,
+        "bfs": None,
+        "source": "",
+        "tier": None,
+        "sub": "",
+        "exp": None,
+        "referrer": None,
+        "claim_keys": [],
+        "checked": [],
+    }
+    for name, value in sources:
+        if not value or value.count(".") < 2:
+            continue
+        info = inspect_jwt_bfs(value)
+        result["checked"].append(name)
+        if not info.get("ok"):
+            continue
+        if not result["ok"]:
+            result.update(
+                {
+                    "ok": True,
+                    "has_bfs": bool(info.get("has_bfs")),
+                    "bfs": info.get("bfs"),
+                    "source": name,
+                    "tier": info.get("tier"),
+                    "sub": info.get("sub") or "",
+                    "exp": info.get("exp"),
+                    "referrer": info.get("referrer"),
+                    "claim_keys": list(info.get("claim_keys") or []),
+                }
+            )
+        # Any source with bfs marks the bundle flagged (prefer reporting that source)
+        if info.get("has_bfs"):
+            result.update(
+                {
+                    "ok": True,
+                    "has_bfs": True,
+                    "bfs": info.get("bfs"),
+                    "source": name,
+                    "tier": info.get("tier"),
+                    "sub": info.get("sub") or result.get("sub") or "",
+                    "exp": info.get("exp") or result.get("exp"),
+                    "referrer": info.get("referrer") or result.get("referrer"),
+                    "claim_keys": list(info.get("claim_keys") or result.get("claim_keys") or []),
+                }
+            )
+            break
+    return result
+
+
+def inspect_cpa_record_bfs(record: dict | None) -> dict:
+    """Inspect a CPA xai-*.json (or similar) auth record for the bfs claim."""
+    if not isinstance(record, dict):
+        return {
+            "ok": False,
+            "has_bfs": False,
+            "bfs": None,
+            "source": "",
+            "email": "",
+            "error": "invalid record",
+        }
+    # Explicit field already written by register flow
+    if "bfs" in record and record.get("bfs") is True:
+        return {
+            "ok": True,
+            "has_bfs": True,
+            "bfs": record.get("bfs_value", record.get("bfs")),
+            "source": "record.bfs",
+            "email": str(record.get("email") or "").strip(),
+            "tier": record.get("tier"),
+            "sub": str(record.get("sub") or "")[:48],
+            "exp": None,
+            "referrer": None,
+            "claim_keys": [],
+            "checked": ["record.bfs"],
+        }
+    if record.get("bfs") is False and record.get("bfs_checked"):
+        return {
+            "ok": True,
+            "has_bfs": False,
+            "bfs": None,
+            "source": "record.bfs",
+            "email": str(record.get("email") or "").strip(),
+            "tier": record.get("tier"),
+            "sub": str(record.get("sub") or "")[:48],
+            "exp": None,
+            "referrer": None,
+            "claim_keys": [],
+            "checked": ["record.bfs"],
+        }
+    info = inspect_token_bundle_bfs(
+        access_token=str(record.get("access_token") or record.get("key") or ""),
+        sso=str(record.get("sso") or ""),
+        id_token=str(record.get("id_token") or ""),
+        refresh_token=str(record.get("refresh_token") or ""),
+    )
+    info["email"] = str(record.get("email") or "").strip()
+    return info
+
+
+def scan_cpa_auth_dir_bfs(
+    auth_dir: str | Path,
+    *,
+    limit: int = 0,
+    include_clean: bool = True,
+) -> dict:
+    """Batch-scan CPA auth directory for JWT bfs flags. Pure local JWT decode."""
+    root = Path(auth_dir)
+    summary = {
+        "ok": True,
+        "auth_dir": str(root),
+        "total": 0,
+        "bfs_count": 0,
+        "clean_count": 0,
+        "error_count": 0,
+        "bfs_rate": 0.0,
+        "bfs_value_dist": {},
+        "items": [],
+        "scanned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if not root.is_dir():
+        summary["ok"] = False
+        summary["error"] = f"auth_dir not found: {root}"
+        return summary
+
+    paths = sorted(root.glob("xai-*.json")) + sorted(root.glob("g2a-*.json"))
+    # de-dup by path
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in paths:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    if limit and limit > 0:
+        ordered = ordered[: int(limit)]
+
+    value_dist: dict[str, int] = {}
+    for path in ordered:
+        summary["total"] += 1
+        item = {
+            "file": path.name,
+            "email": "",
+            "has_bfs": False,
+            "bfs": None,
+            "source": "",
+            "disabled": None,
+            "error": "",
+        }
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            summary["error_count"] += 1
+            item["error"] = str(exc)[:120]
+            summary["items"].append(item)
+            continue
+        # Nested grok2api style: top-level issuer::client_id → entry with key
+        if isinstance(data, dict) and "access_token" not in data and "key" not in data:
+            for _k, entry in data.items():
+                if isinstance(entry, dict) and (entry.get("key") or entry.get("access_token")):
+                    data = {
+                        "access_token": entry.get("access_token") or entry.get("key") or "",
+                        "refresh_token": entry.get("refresh_token") or "",
+                        "email": entry.get("email") or "",
+                        "sub": entry.get("user_id") or entry.get("sub") or "",
+                        "sso": entry.get("sso") or "",
+                        "disabled": entry.get("disabled"),
+                        "bfs": entry.get("bfs"),
+                        "bfs_value": entry.get("bfs_value"),
+                        "bfs_checked": entry.get("bfs_checked"),
+                    }
+                    break
+        info = inspect_cpa_record_bfs(data if isinstance(data, dict) else None)
+        item["email"] = str(info.get("email") or (data.get("email") if isinstance(data, dict) else "") or "")
+        item["has_bfs"] = bool(info.get("has_bfs"))
+        item["bfs"] = info.get("bfs")
+        item["source"] = str(info.get("source") or "")
+        item["sub"] = str(info.get("sub") or "")
+        item["tier"] = info.get("tier")
+        if isinstance(data, dict) and "disabled" in data:
+            item["disabled"] = bool(data.get("disabled"))
+        if not info.get("ok") and not info.get("has_bfs"):
+            summary["error_count"] += 1
+            item["error"] = "jwt decode failed or empty token"
+            summary["items"].append(item)
+            continue
+        if item["has_bfs"]:
+            summary["bfs_count"] += 1
+            key = str(item["bfs"])
+            value_dist[key] = value_dist.get(key, 0) + 1
+            summary["items"].append(item)
+        else:
+            summary["clean_count"] += 1
+            if include_clean:
+                summary["items"].append(item)
+    decoded = summary["bfs_count"] + summary["clean_count"]
+    summary["bfs_rate"] = round(100.0 * summary["bfs_count"] / decoded, 2) if decoded else 0.0
+    summary["bfs_value_dist"] = value_dist
+    return summary
+
+
+def apply_bfs_to_cpa_record(record: dict, bfs_info: dict | None = None) -> dict:
+    """Annotate CPA record with bfs metadata; optionally disable flagged accounts."""
+    if not isinstance(record, dict):
+        return record
+    info = bfs_info or inspect_cpa_record_bfs(record)
+    has = bool(info.get("has_bfs"))
+    record["bfs"] = has
+    record["bfs_checked"] = True
+    if has:
+        record["bfs_value"] = info.get("bfs")
+        record["bfs_source"] = str(info.get("source") or "")
+    else:
+        record.pop("bfs_value", None)
+        record.pop("bfs_source", None)
+    return record
+
+
 def rfc3339_ns(ts: float | None = None) -> str:
     """2026-07-10T01:00:00.000000000Z"""
     if ts is None:
@@ -1266,6 +1537,14 @@ def token_to_cpa_record(token: dict, email: str = "", sso: str = "") -> dict:
     sso_val = str(sso or "").strip()
     if sso_val:
         record["sso"] = sso_val
+    # Always annotate bfs from access_token / sso JWT (key presence = flagged)
+    bfs_info = inspect_token_bundle_bfs(
+        access_token=access,
+        sso=sso_val,
+        id_token=id_token,
+        refresh_token=refresh,
+    )
+    apply_bfs_to_cpa_record(record, bfs_info)
     return record
 
 
@@ -1491,7 +1770,11 @@ def load_sso_records(
         account_root = Path(accounts_dir)
         if account_root.is_dir():
             for candidate in sorted(account_root.glob("*.txt")):
-                if candidate.name in {"mail_credentials.txt", "sso_risk_rejected.txt"}:
+                if candidate.name in {
+                    "mail_credentials.txt",
+                    "sso_risk_rejected.txt",
+                    "sso_bfs_flagged.txt",
+                }:
                     continue
                 paths.append(candidate)
     for input_path in paths:
@@ -1657,7 +1940,53 @@ def main() -> int:
     ap.add_argument("--proxy", default="", help="OAuth 请求走代理，如 http://127.0.0.1:7890")
     ap.add_argument("--consume-success", action="store_true", help="成功后从 --sso 队列原子移除对应记录")
     ap.add_argument("--report-json", default=None, help="写入不含 token 的运行摘要 JSON")
+    ap.add_argument(
+        "--check-bfs-dir",
+        metavar="DIR",
+        default=None,
+        help="仅扫描 CPA/Grok2API auth 目录中 JWT 的 bfs 标记（不换 token）",
+    )
+    ap.add_argument(
+        "--bfs-export",
+        metavar="FILE",
+        default=None,
+        help="与 --check-bfs-dir 联用：导出 has_bfs 列表（jsonl，不含 token）",
+    )
+    ap.add_argument(
+        "--bfs-skip-write",
+        action="store_true",
+        help="换 token 后若 access_token/sso 含 bfs claim，跳过 CPA/Grok2API 写入",
+    )
+    ap.add_argument(
+        "--bfs-disable",
+        action="store_true",
+        help="换 token 后若含 bfs，仍写入 CPA 但 disabled=true",
+    )
     args = ap.parse_args()
+
+    # Standalone batch bfs scan (no SSO conversion)
+    if args.check_bfs_dir:
+        summary = scan_cpa_auth_dir_bfs(args.check_bfs_dir, include_clean=True)
+        if args.bfs_export:
+            export_path = Path(args.bfs_export)
+            ensure_private_dir(export_path.parent)
+            lines = []
+            for item in summary.get("items") or []:
+                if not item.get("has_bfs"):
+                    continue
+                lines.append(json.dumps(item, ensure_ascii=False))
+            atomic_write_text(export_path, ("\n".join(lines) + ("\n" if lines else "")))
+            print(f"导出 bfs 列表 → {export_path} ({len(lines)} 条)")
+        print(
+            f"bfs 扫描: total={summary.get('total')} bfs={summary.get('bfs_count')} "
+            f"clean={summary.get('clean_count')} err={summary.get('error_count')} "
+            f"rate={summary.get('bfs_rate')}% dist={summary.get('bfs_value_dist')}"
+        )
+        if args.report_json:
+            # strip full items if huge? keep summary with items for offline review
+            atomic_write_json(args.report_json, summary)
+            print(f"报告 → {args.report_json}")
+        return 0 if summary.get("ok") else 1
 
     apply_config_defaults(args)
     records = load_sso_records(
@@ -1666,7 +1995,7 @@ def main() -> int:
         accounts_dir=args.accounts_dir,
     )
     if not records:
-        ap.error("需要有效的 --sso、--sso-cookie 或 --accounts-dir")
+        ap.error("需要有效的 --sso、--sso-cookie、--accounts-dir 或 --check-bfs-dir")
     if args.consume_success and not args.sso:
         ap.error("--consume-success 只能与 --sso FILE 一起使用")
     if args.merge and not args.out:
@@ -1713,6 +2042,7 @@ def main() -> int:
     )
     ok = 0
     fail = 0
+    bfs_flagged = 0
     succeeded_ssos: set[str] = set()
     failures: list[dict] = []
 
@@ -1745,6 +2075,34 @@ def main() -> int:
                 failures.append({"index": i, "email": _mask_report_email(email), "reason": "token-conversion"})
                 print(f"  ❌ [{i}] 失败")
                 continue
+
+            bfs_info = inspect_token_bundle_bfs(
+                access_token=str(token.get("access_token") or ""),
+                sso=sso,
+                id_token=str(token.get("id_token") or ""),
+                refresh_token=str(token.get("refresh_token") or ""),
+            )
+            if bfs_info.get("has_bfs"):
+                bfs_flagged += 1
+                print(
+                    f"  ⚠️ JWT bfs 标记: value={bfs_info.get('bfs')!r} "
+                    f"source={bfs_info.get('source') or '-'}"
+                )
+                if args.bfs_skip_write:
+                    fail += 1
+                    failures.append(
+                        {
+                            "index": i,
+                            "email": _mask_report_email(email),
+                            "reason": "bfs-flagged",
+                            "bfs": bfs_info.get("bfs"),
+                        }
+                    )
+                    print(f"  ❌ [{i}] bfs 标记，已按 --bfs-skip-write 跳过写入")
+                    continue
+            else:
+                print("  ✅ JWT bfs 检测: clean（无 bfs claim）")
+
             key, entry = token_to_auth_entry(token, email=email)
             uid = entry.get("user_id") or secrets.token_hex(4)
 
@@ -1766,6 +2124,9 @@ def main() -> int:
 
             if args.cpa_auth_dir or args.cpa_remote_url:
                 cpa_record = token_to_cpa_record(token, email=email, sso=sso)
+                if args.bfs_disable and cpa_record.get("bfs"):
+                    cpa_record["disabled"] = True
+                    print("  ⚠️ bfs 账号已标记 disabled=true")
                 if args.cpa_auth_dir:
                     cp = write_cpa_auth(Path(args.cpa_auth_dir), cpa_record)
                     print(f"  💾 CPA 本地 → {cp}")
@@ -1808,12 +2169,16 @@ def main() -> int:
         "skipped_existing_count": len(already_present),
         "success_count": ok,
         "failure_count": fail,
+        "bfs_flagged_count": bfs_flagged,
         "remaining_count": remaining,
         "failures": failures,
     }
     if args.report_json:
         atomic_write_json(args.report_json, report)
-    print(f"\n{'=' * 60}\n📊 完成: {ok}/{len(records)} 成功, {fail} 失败")
+    print(
+        f"\n{'=' * 60}\n📊 完成: {ok}/{len(records)} 成功, {fail} 失败, "
+        f"bfs={bfs_flagged}"
+    )
     return 0 if fail == 0 else 1
 
 
