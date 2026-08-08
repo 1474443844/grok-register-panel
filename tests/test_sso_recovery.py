@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from sso_to_auth_json import (
+    apply_config_defaults,
     consume_successful_records,
     existing_cpa_emails,
     load_sso_records,
@@ -76,9 +77,45 @@ def test_existing_cpa_email_detection():
         assert existing_cpa_emails(root) == {"person@example.com"}
 
 
+def test_bfs_config_defaults_are_loaded_for_cli():
+    with tempfile.TemporaryDirectory() as temp:
+        config = Path(temp) / "config.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "cpa_auth_dir": "cpa",
+                    "grok2api_auth_dir": "g2a",
+                    "bfs_check": False,
+                    "bfs_skip_cpa": True,
+                    "bfs_disable_cpa": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = SimpleNamespace(
+            from_config=str(config),
+            cpa_auth_dir=None,
+            grok2api_auth_dir=None,
+            cpa_remote_url=None,
+            cpa_management_key=None,
+            proxy="",
+            prefer=None,
+            bfs_check=None,
+            bfs_skip_write=None,
+            bfs_disable=None,
+        )
+        apply_config_defaults(args)
+        assert args.bfs_check is False
+        assert args.bfs_skip_write is True
+        assert args.bfs_disable is True
+        assert args.cpa_auth_dir == str((Path(temp) / "cpa").resolve())
+        assert args.grok2api_auth_dir == str((Path(temp) / "g2a").resolve())
+
+
 if __name__ == "__main__":
     test_parser_preserves_email_and_password()
     test_queue_dedup_and_consume()
     test_cpa_only_batch_does_not_create_auth_out()
     test_existing_cpa_email_detection()
+    test_bfs_config_defaults_are_loaded_for_cli()
     print("OK sso recovery")

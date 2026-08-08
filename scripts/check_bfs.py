@@ -18,13 +18,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sso_to_auth_json import inspect_jwt_bfs, scan_cpa_auth_dir_bfs  # noqa: E402
+from secure_files import atomic_write_json, atomic_write_text  # noqa: E402
+from sso_to_auth_json import scan_cpa_auth_dir_bfs  # noqa: E402
 from webui.bfs_ops import check_token_text, run_bfs_scan  # noqa: E402
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Scan auth files / JWT for bfs claim")
-    ap.add_argument("--dir", metavar="DIR", help="Single auth directory (xai-*.json)")
+    ap.add_argument("--dir", metavar="DIR", help="Single auth directory containing JSON auth files")
     ap.add_argument("--export", metavar="FILE", help="Write flagged rows as jsonl")
     ap.add_argument("--report", metavar="FILE", help="Write full summary JSON")
     ap.add_argument("--token", metavar="JWT", help="Check one JWT/SSO string")
@@ -46,19 +47,17 @@ def main() -> int:
 
     if args.export:
         path = Path(args.export)
-        path.parent.mkdir(parents=True, exist_ok=True)
         rows = [it for it in (summary.get("items") or []) if it.get("has_bfs")]
-        path.write_text(
+        atomic_write_text(
+            path,
             "\n".join(json.dumps(r, ensure_ascii=False) for r in rows)
-            + ("\n" if rows else ""),
-            encoding="utf-8",
+            + ("\n" if rows else "")
         )
         print(f"export → {path} ({len(rows)} bfs)")
 
     if args.report:
         path = Path(args.report)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(path, summary)
         print(f"report → {path}")
 
     print(
