@@ -137,6 +137,14 @@ def test_proxy_pool_panel_structure():
     assert '面板代理池没有健康且启用的代理' in worker
     assert 'redact_proxy(px)' in worker
 
+def test_stats_refresh_persists_across_snapshot_polling():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    assert 'let fullStats = null;' in mon
+    assert 'fullStats = j;' in mon
+    assert 'function statsForSnapshot(d)' in mon
+    assert 'return Object.assign({}, fullStats, liveStats' in mon
+    assert 'renderStats(statsForSnapshot(d));' in mon
+
 def test_email_service_and_domain_rotation_panel_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
     html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
@@ -209,6 +217,7 @@ if __name__ == '__main__':
     test_reference_motion_and_reduced_motion()
     test_compact_overview_density()
     test_help_and_faq_module()
+    test_stats_refresh_persists_across_snapshot_polling()
     test_proxy_pool_panel_structure()
     test_email_service_and_domain_rotation_panel_structure()
     test_panel_security_and_recovery_structure()
