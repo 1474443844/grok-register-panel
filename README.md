@@ -5,7 +5,7 @@
 Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (MIT).
 
 批量注册 Grok 账号（Camoufox）+ Web 监控面板  
-启停 / 并发 / ASN 黑名单 / 1h·3h·12h 成功率 / **Token 鉴权**
+任务编排 / 代理池 / 邮箱服务 / 域名轮换 / 账号补录 / BFS 检测 / **Token 鉴权**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)
@@ -26,7 +26,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 能力 | 说明 |
 |------|------|
 | 注册全链路 | 邮箱 OTP → 资料页 → Turnstile → SSO → Device / OAuth → 写入 CPA / Grok2API |
-| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail 等 |
+| 多邮箱后端 | Cloudflare Worker 邮、DuckMail、YYDS、MailNest、CloudMail、MoeMail；面板内切换、保存和连通性测试 |
 | 反检测浏览器 | [Camoufox](https://camoufox.com/)（Gecko 层指纹） |
 | 出口预检 | 启动前解析出口 IP / ASN，命中黑名单直接换口 |
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
@@ -36,6 +36,7 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
+| 可选静态缓存 | 仅复用 JS / CSS / 字体 / 图片等 GET 静态资源；默认关闭，不缓存文档、接口、WebSocket 或 Turnstile |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
 ## 界面预览
@@ -45,7 +46,27 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
   <img alt="Grok Register 注册控制台" src="docs/screenshots/dashboard-light.png">
 </picture>
 
-控制台集中展示任务参数、批次进度、时段成功率、账号补录和黑名单状态；图片会跟随 GitHub 的深浅主题自动切换。
+控制台集中展示任务参数、批次进度、时段成功率、账号补录、BFS 扫描和黑名单状态。
+
+<details>
+<summary><strong>代理池：批量导入、探活、冷却和出口质量</strong></summary>
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/proxy-pool-dark.png">
+  <img alt="Grok Register 外部代理池" src="docs/screenshots/proxy-pool-light.png">
+</picture>
+</details>
+
+<details>
+<summary><strong>邮箱服务：六种 provider 与高级域名轮换</strong></summary>
+<br>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/email-service-dark.png">
+  <img alt="Grok Register 邮箱服务与域名轮换" src="docs/screenshots/email-service-light.png">
+</picture>
+</details>
+
+以上图片使用脱敏示例数据，并会跟随 GitHub 的深浅主题自动切换。
 
 ## 架构示意
 
@@ -376,6 +397,7 @@ python scripts/check_bfs.py --token 'eyJ...'
 ├── sso_to_auth_json.py        # SSO → OAuth / 写 CPA（auth 文件 0600）
 ├── camoufox_adapter.py
 ├── connectivity.py
+├── batch_supervisor.py        # 批处理监督、卡死恢复与原子进度
 ├── run_batch_headless.py      # 无头批量（包根 Path 后 chdir）
 ├── run_until_100.py           # 编排器
 ├── webui/
@@ -383,6 +405,7 @@ python scripts/check_bfs.py --token 'eyJ...'
 │   ├── security_utils.py      # redact / token 校验
 │   ├── blacklist_store.py     # 锁保护的 JSON 黑名单状态
 │   ├── proxy_store.py         # 外部代理池、探活、冷却与脱敏视图
+│   ├── email_provider_store.py # 邮箱 provider 配置、测试与密钥保护
 │   ├── email_domain_store.py  # 邮箱域名池、拒绝阈值与轮换状态
 │   ├── process_utils.py       # 当前项目实例的进程发现 / 停止
 │   ├── recovery_ops.py        # SSO / accounts 异步补录
@@ -396,12 +419,16 @@ python scripts/check_bfs.py --token 'eyJ...'
 ├── config.example.json
 ├── proxies.example.txt
 ├── requirements.txt
+├── AGENTS.md                  # AI 编码代理的仓库工作指南
 ├── DEPLOYMENT.md
 ├── LICENSE · NOTICE
 └── README.md
 ```
 
 ## 自检
+
+参与开发或让 AI 修改仓库前，先阅读 [AGENTS.md](AGENTS.md)。部署细节见
+[DEPLOYMENT.md](DEPLOYMENT.md)，发布验收见 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
 
 ```bash
 # 无需 pytest；运行全部发布检查
