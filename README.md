@@ -11,10 +11,6 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)
 ![Stars](https://img.shields.io/github/stars/lij768423-svg/grok-register-panel?style=flat)
 
-**仓库：** https://github.com/lij768423-svg/grok-register-panel
-
-**项目主页 / 自用面板：** http://100.102.32.24:8792/（仅 Tailscale 内网可达）
-
 </div>
 
 ---
