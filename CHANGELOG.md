@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- Add post-registration sign-in recovery so workers can rebuild an SSO session with the account credentials when the normal redirect loses the cookie.
+- Add bounded Cloudflare address-collision retries and a configurable random-subdomain mode for wildcard mail routing.
+
+### Changed
+
+- Display panel, proxy, blacklist, and worker timestamps in Beijing time regardless of the server timezone.
+- Keep up to 80 recent success/failure records and paginate them in the panel while refreshing full statistics every 30 seconds.
+
+### Fixed
+
+- Preserve BFS `unknown` handling and `bfs_skip_cpa` behavior instead of treating undecodable tokens as clean.
+- Redact Cloudflare fallback errors, avoid retrying unrelated HTTP 400 responses, and fall back to fixed UTC+8 when system tzdata is unavailable.
+- Remove the narrow-layout horizontal overflow in the panel's proxy and email views.
+
 ## 0.3.0 - 2026-08-09
 
 ### Added
@@ -20,7 +36,7 @@
 - Make process discovery and batch launch platform-aware with `psutil`, Linux auto-Xvfb, macOS direct launch, Windows virtualenv paths, and actionable missing-procfs errors.
 - Support external runtime roots while keeping process control scoped to the configured project.
 - Move GitHub Actions to Node.js 24-compatible action versions and expand release checks for proxy, email, BFS, cache, platform, and supervisor behavior.
-- Document the Tailscale self-use panel, LINUX DO community link, and related Grok2API egress project.
+- Document deployment guidance, the LINUX DO community link, and the related Grok2API egress project.
 
 ### Fixed
 
