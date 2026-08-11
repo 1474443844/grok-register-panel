@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-11
+
 ### Added
 
 - Add post-registration sign-in recovery so workers can rebuild an SSO session with the account credentials when the normal redirect loses the cookie.
