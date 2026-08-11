@@ -26,6 +26,7 @@ PROVIDER_LABELS = {
     "mailnest": "MailNest",
     "cloudmail": "CloudMail",
     "moemail": "MoeMail",
+    "microsoftmail": "Microsoft Outlook",
 }
 SUPPORTED_PROVIDERS = tuple(PROVIDER_LABELS)
 
@@ -164,6 +165,30 @@ FIELD_DEFINITIONS = {
             {"value": 0, "label": "永久"},
         ],
     },
+    "microsoftmail_accounts_file": {
+        "label": "账号文件",
+        "type": "text",
+        "default": "accounts.json",
+        "placeholder": "accounts.json",
+    },
+    "microsoftmail_alias_prefix": {
+        "label": "别名前缀",
+        "type": "text",
+        "placeholder": "留空自动生成（如 grok1abc）",
+    },
+    "microsoftmail_alias_length": {
+        "label": "别名长度",
+        "type": "select",
+        "default": "8",
+        "options": [
+            {"value": "4", "label": "4（短）"},
+            {"value": "6", "label": "6"},
+            {"value": "8", "label": "8（默认）"},
+            {"value": "10", "label": "10"},
+            {"value": "12", "label": "12"},
+            {"value": "16", "label": "16（长）"},
+        ],
+    },
 }
 
 PROVIDER_FIELDS = {
@@ -193,6 +218,11 @@ PROVIDER_FIELDS = {
         "moemail_api_key",
         "moemail_domain",
         "moemail_expiry_ms",
+    ),
+    "microsoftmail": (
+        "microsoftmail_accounts_file",
+        "microsoftmail_alias_prefix",
+        "microsoftmail_alias_length",
     ),
 }
 
@@ -355,6 +385,8 @@ def _is_configured(provider: str, values: dict) -> bool:
         )
     if provider == "moemail":
         return bool(values.get("moemail_api_base") and values.get("moemail_api_key"))
+    if provider == "microsoftmail":
+        return bool(values.get("microsoftmail_accounts_file"))
     return False
 
 

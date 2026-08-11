@@ -246,6 +246,13 @@ def check_email_api(provider: str, config: dict, http_get: Callable, http_post: 
                 detail += f"；域名 {domains[:80]}"
             return "邮箱API", True, detail
 
+        if provider == "microsoftmail":
+            from email_providers import microsoftmail as microsoftmail_provider
+
+            accounts_file = str(config.get("microsoftmail_accounts_file", "accounts.json") or "accounts.json").strip()
+            ok, detail = microsoftmail_provider.test_connection(accounts_file)
+            return "邮箱API", ok, detail
+
         return "邮箱API", True, f"提供商 {provider} 跳过深度探测"
     except Exception as exc:
         return "邮箱API", False, redact_log_line(str(exc))
