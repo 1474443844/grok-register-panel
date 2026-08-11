@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -15,11 +16,28 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
+
 
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
+_LOCK_CHUNK = 1
+
+
+def _fchmod(fd: int, mode: int) -> None:
+    """Best-effort fchmod; missing on Windows."""
+    fn = getattr(os, "fchmod", None)
+    if fn is None:
+        return
+    try:
+        fn(fd, mode)
+    except OSError:
+        pass
 
 
 def ensure_private_dir(path: str | os.PathLike[str]) -> Path:
@@ -56,10 +74,7 @@ def append_private_text(
         PRIVATE_FILE_MODE,
     )
     try:
-        try:
-            os.fchmod(fd, PRIVATE_FILE_MODE)
-        except OSError:
-            pass
+        _fchmod(fd, PRIVATE_FILE_MODE)
         with os.fdopen(fd, "a", encoding=encoding, newline="\n") as handle:
             fd = -1
             handle.write(text)
@@ -84,10 +99,7 @@ def create_private_text(
         PRIVATE_FILE_MODE,
     )
     try:
-        try:
-            os.fchmod(fd, PRIVATE_FILE_MODE)
-        except OSError:
-            pass
+        _fchmod(fd, PRIVATE_FILE_MODE)
         with os.fdopen(fd, "w", encoding=encoding, newline="\n") as handle:
             fd = -1
             handle.write(text)
@@ -113,10 +125,7 @@ def atomic_write_text(
     )
     temp_path = Path(temp_name)
     try:
-        try:
-            os.fchmod(fd, PRIVATE_FILE_MODE)
-        except OSError:
-            pass
+        _fchmod(fd, PRIVATE_FILE_MODE)
         with os.fdopen(fd, "w", encoding=encoding, newline="\n") as handle:
             fd = -1
             handle.write(text)
@@ -151,6 +160,44 @@ def _thread_lock_for(path: Path) -> threading.RLock:
         return _THREAD_LOCKS.setdefault(key, threading.RLock())
 
 
+def _acquire_os_lock(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    if msvcrt is not None:
+        # Ensure the lock region exists; msvcrt locks by byte range.
+        try:
+            size = os.fstat(fd).st_size
+        except OSError:
+            size = 0
+        if size < _LOCK_CHUNK:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, b"\0" * _LOCK_CHUNK)
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, _LOCK_CHUNK)
+                return
+            except OSError:
+                # LK_LOCK retries internally; still guard against transient errors.
+                time.sleep(0.05)
+
+
+def _release_os_lock(fd: int) -> None:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return
+    if msvcrt is not None:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, _LOCK_CHUNK)
+        except OSError:
+            pass
+
+
 @contextmanager
 def exclusive_file_lock(path: str | os.PathLike[str]) -> Iterator[None]:
     lock_path = Path(path)
@@ -163,17 +210,9 @@ def exclusive_file_lock(path: str | os.PathLike[str]) -> Iterator[None]:
             PRIVATE_FILE_MODE,
         )
         try:
-            try:
-                os.fchmod(fd, PRIVATE_FILE_MODE)
-            except OSError:
-                pass
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            _fchmod(fd, PRIVATE_FILE_MODE)
+            _acquire_os_lock(fd)
             yield
         finally:
-            if fcntl is not None:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                except OSError:
-                    pass
+            _release_os_lock(fd)
             os.close(fd)
