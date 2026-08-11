@@ -6,17 +6,22 @@
 
 - Add post-registration sign-in recovery so workers can rebuild an SSO session with the account credentials when the normal redirect loses the cookie.
 - Add bounded Cloudflare address-collision retries and a configurable random-subdomain mode for wildcard mail routing.
+- Add per-batch HTTP/HTTPS proxy byte metering with authenticated upstream forwarding and a live upload/download KPI in the panel.
+- Add Windows-safe supervisor pipe streaming, recursive Camoufox process-tree shutdown, and user-local browser profiles.
 
 ### Changed
 
 - Display panel, proxy, blacklist, and worker timestamps in Beijing time regardless of the server timezone.
 - Keep up to 80 recent success/failure records and paginate them in the panel while refreshing full statistics every 30 seconds.
+- Enable the guarded static-asset cache for panel-launched batches and reduce browser, proxy-rotation, slot, and supervisor retry defaults.
+- Stop the batch and orchestrator without retrying when the xAI registration-page precheck fails.
 
 ### Fixed
 
 - Preserve BFS `unknown` handling and `bfs_skip_cpa` behavior instead of treating undecodable tokens as clean.
 - Redact Cloudflare fallback errors, avoid retrying unrelated HTTP 400 responses, and fall back to fixed UTC+8 when system tzdata is unavailable.
 - Remove the narrow-layout horizontal overflow in the panel's proxy and email views.
+- Bound Windows proxy exit-IP probes by a total timeout and reject malformed or stale cached IP candidates.
 
 ## 0.3.0 - 2026-08-09
 

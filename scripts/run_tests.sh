@@ -12,11 +12,14 @@ tests=(
   tests/test_cloudflare_provider.py
   tests/test_runtime_security.py
   tests/test_runtime_platform.py
+  tests/test_windows_runtime.py
   tests/test_sso_recovery.py
   tests/test_bfs_detect.py
   tests/test_bfs_ops.py
   tests/test_bfs_worker_integration.py
   tests/test_static_asset_cache.py
+  tests/test_batch_traffic.py
+  tests/test_retry_policy.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py
   tests/test_proxy_worker_integration.py
@@ -28,6 +31,7 @@ tests=(
   tests/test_no_live_hardcode.py
   tests/test_batch_chdir_import.py
   tests/test_batch_supervisor.py
+  tests/test_orchestrator_policy.py
 )
 
 for test_file in "${tests[@]}"; do
@@ -50,6 +54,8 @@ done
   scripts/check_bfs.py \
   webui/bfs_ops.py \
   static_asset_cache.py \
+  batch_traffic.py \
+  retry_policy.py \
   run_batch_headless_static_cache.py \
   run_until_100_static_cache.py
 

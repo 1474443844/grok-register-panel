@@ -96,7 +96,10 @@ def test_monitor_http_auth_and_headers():
 
         status, _, body = request(base + "/api/status", token=token)
         assert status == 200
-        assert "process" in json.loads(body)
+        status_payload = json.loads(body)
+        assert "process" in status_payload
+        assert "traffic" in status_payload
+        assert "bytes_up" in status_payload["traffic"]
 
         status, _, _ = request(base + "/api/recovery")
         assert status == 401
@@ -129,6 +132,26 @@ def test_monitor_http_auth_and_headers():
             os.environ.pop("MONITOR_TOKEN", None)
         else:
             os.environ["MONITOR_TOKEN"] = previous
+
+
+def test_panel_registration_env_enables_guarded_cache():
+    previous_enabled = os.environ.pop("GROK_STATIC_ASSET_CACHE", None)
+    previous_dir = os.environ.pop("GROK_STATIC_CACHE_DIR", None)
+    try:
+        env = monitor._registration_env()
+        assert env["GROK_STATIC_ASSET_CACHE"] == "1"
+        assert env["GROK_STATIC_CACHE_DIR"].endswith("log/static-asset-cache")
+        os.environ["GROK_STATIC_ASSET_CACHE"] = "0"
+        assert monitor._registration_env()["GROK_STATIC_ASSET_CACHE"] == "0"
+    finally:
+        if previous_enabled is None:
+            os.environ.pop("GROK_STATIC_ASSET_CACHE", None)
+        else:
+            os.environ["GROK_STATIC_ASSET_CACHE"] = previous_enabled
+        if previous_dir is None:
+            os.environ.pop("GROK_STATIC_CACHE_DIR", None)
+        else:
+            os.environ["GROK_STATIC_CACHE_DIR"] = previous_dir
 
 
 def test_proxy_api_auth_mutations_and_redaction():
@@ -471,6 +494,7 @@ if __name__ == "__main__":
     test_compat_process_roots_require_existing_absolute_paths()
     test_process_discovery_aggregates_explicit_release_roots()
     test_monitor_http_auth_and_headers()
+    test_panel_registration_env_enables_guarded_cache()
     test_proxy_api_auth_mutations_and_redaction()
     test_email_domain_api_auth_and_mutations()
     test_email_provider_api_auth_secret_masking_and_probe()

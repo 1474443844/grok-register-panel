@@ -46,6 +46,7 @@ import browser_session as _bs
 import register_flow as _rf
 import connectivity as _conn
 from batch_supervisor import mark_slot_completed
+from retry_policy import proxy_boot_rotations, slot_retries
 from secure_files import (
     append_private_text,
     atomic_write_json,
@@ -491,6 +492,18 @@ def load_config():
         except Exception:
             config = DEFAULT_CONFIG.copy()
     return config
+
+
+def _sleep_cancelable(seconds, should_stop=None) -> None:
+    """Sleep in short slices so stop flags can interrupt account gaps."""
+    end = time.time() + max(0.0, float(seconds or 0))
+    while time.time() < end:
+        if callable(should_stop) and should_stop():
+            return
+        remaining = end - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
 
 
 def parse_account_interval() -> float:
@@ -3304,7 +3317,7 @@ class GrokRegisterGUI:
             wlog("[*] 浏览器已启动")
             i = 0
             retry_count_for_slot = 0
-            max_slot_retry = 3
+            max_slot_retry = slot_retries()
             while i < count:
                 if self.should_stop():
                     break
@@ -3529,7 +3542,8 @@ def run_registration_cli(count):
     fail_count = 0
     fail_stats = empty_fail_stats()
     retry_count_for_slot = 0
-    max_slot_retry = 3
+    max_slot_retry = slot_retries()
+    max_proxy_boot_rotations = proxy_boot_rotations()
     accounts_output_file = ""  # 已改为按邮箱单独保存，不再使用批量文件
     workers = max(1, min(int(config.get("register_workers", 1) or 1), 24, int(count or 1)))
     pool = load_proxy_pool()
@@ -3559,17 +3573,26 @@ def run_registration_cli(count):
                 f"{redact_sensitive_log_line(detail)}"
             )
         if _conn.has_blocking_xai_failure(startup_checks):
-            cli_log("[!] xAI 注册页被 Cloudflare 拦截，已停止建号；请更换当前 proxy 后重试")
+            cli_log("[!] xAI 注册页预检失败，已停止当前批次；请检查或更换当前 proxy 后重试")
             try:
                 signal.signal(signal.SIGINT, _prev_sigint)
             except Exception:
                 pass
-            return
+            _conn.require_xai_signup(startup_checks)
+    except _conn.XaiSignupPrecheckFailed:
+        raise
     except Exception as exc:
         cli_log(
-            f"[!] 启动连通性检查异常，继续注册: "
+            f"[!] 启动连通性检查异常，已停止当前批次: "
             f"{redact_sensitive_log_line(str(exc))}"
         )
+        try:
+            signal.signal(signal.SIGINT, _prev_sigint)
+        except Exception:
+            pass
+        raise _conn.XaiSignupPrecheckFailed(
+            "xAI registration page precheck raised an exception"
+        ) from exc
 
     def _cli_record_failure(exc):
         nonlocal fail_count
@@ -3612,7 +3635,7 @@ def run_registration_cli(count):
                     # 黑名单/死代理：多换几条 sticky 再放弃
                     booted = False
                     last_boot = boot_exc
-                    for _try in range(1, 12):
+                    for _try in range(1, max_proxy_boot_rotations + 1):
                         msgb = str(last_boot)
                         if not (
                             "出口IP命中黑名单" in msgb
@@ -3880,7 +3903,7 @@ def run_registration_cli(count):
                                     )
                                     worker_stop = True
                                 else:
-                                    for _try in range(1, 10):
+                                    for _try in range(1, max_proxy_boot_rotations + 1):
                                         msgb = str(last_boot)
                                         if not (
                                             "出口IP命中黑名单" in msgb
@@ -3958,7 +3981,10 @@ def run_registration_cli(count):
     try:
         single_rotate_idx = 0
         last_boot = None
-        boot_attempts = max(1, min(12, len(pool) or 1))
+        boot_attempts = max(
+            1,
+            min(max_proxy_boot_rotations + 1, len(pool) or 1),
+        )
         for _boot_try in range(boot_attempts):
             px = ""
             try:

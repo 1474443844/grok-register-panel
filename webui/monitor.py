@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from secure_files import atomic_write_json, ensure_private_dir
+from batch_traffic import read_metrics as read_batch_traffic
 from runtime_platform import (
     batch_launch_command,
     batch_runtime_error,
@@ -103,6 +104,7 @@ except ImportError:  # running as script from webui/
         redact_proxy,
     )
 LOG_DIR = ROOT / "log"
+BATCH_TRAFFIC = LOG_DIR / "batch_traffic.json"
 CPA_DIR = Path(os.environ.get("CPA_AUTH_DIR", str(ROOT / "cpa_auth")))
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 FONT_ASSETS = {
@@ -668,6 +670,17 @@ def _runtime_prerequisite_error() -> str | None:
     return None
 
 
+def _registration_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("GROK_STATIC_ASSET_CACHE", "1")
+    env.setdefault(
+        "GROK_STATIC_CACHE_DIR",
+        str(LOG_DIR / "static-asset-cache"),
+    )
+    return env
+
+
 def _start_orch_unlocked():
     proc = process_running()
     if proc.get("orch_running") or proc.get("batch_running"):
@@ -719,7 +732,7 @@ def _start_orch_unlocked():
             cwd=str(ROOT),
             stdout=stdout,
             stderr=subprocess.STDOUT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=_registration_env(),
             **popen_group_kwargs(),
         )
     finally:
@@ -780,6 +793,7 @@ def _start_batch_only_unlocked():
             cwd=str(ROOT),
             stdout=fout,
             stderr=subprocess.STDOUT,
+            env=_registration_env(),
             **popen_group_kwargs(),
         )
     finally:
@@ -831,6 +845,9 @@ def snapshot():
             eta_min = remain / rate_per_min
             eta = f"{int(eta_min)}m" if eta_min < 120 else f"{eta_min/60:.1f}h"
     workers_show = parsed.get("workers") or control.get("workers")
+    traffic = read_batch_traffic(BATCH_TRAFFIC)
+    if traffic.get("running") and not proc.get("running"):
+        traffic["running"] = False
     return {
         "ts": time.time(),
         "ts_human": beijing_strftime("%Y-%m-%d %H:%M:%S"),
@@ -846,6 +863,7 @@ def snapshot():
         "success_rate": round(100.0 * ok / done, 1) if done else None,
         "rate_per_min": rate_per_min,
         "eta": eta,
+        "traffic": traffic,
         "blacklist": {
             "count": bl.get("count"),
             "asns": bl.get("asns"),
@@ -884,6 +902,10 @@ HTML = r"""<!DOCTYPE html>
   })();
 </script>
 <style>
+  /* Hallmark · macrostructure: Workbench · tone: utilitarian · anchor hue: oxide-red
+   * pre-emit critique: P4 H5 E5 S5 R5 V4 · component: batch traffic KPI
+   * contrast: inherited pass · mobile: verified at 320/375/414/768
+   */
   @font-face {
     font-family: "Geist";
     src: url("/assets/geist.woff2") format("woff2");
@@ -2470,6 +2492,19 @@ document.addEventListener("keydown", event => {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return Math.round(bytes) + " B";
+  const units = ["KB", "MB", "GB", "TB"];
+  let scaled = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && scaled >= 1024; i += 1) {
+    scaled /= 1024;
+    unit = units[i];
+  }
+  const digits = scaled >= 100 ? 0 : (scaled >= 10 ? 1 : 2);
+  return scaled.toFixed(digits) + " " + unit;
+}
 function setMsg(id, text, cls) {
   const el = document.getElementById(id);
   el.textContent = text || "";
@@ -3224,6 +3259,14 @@ function render(d) {
   document.getElementById("btn-stop").disabled = !on;
   fillControl(d);
 
+  const traffic = d.traffic || {};
+  const hasTrafficBatch = !!traffic.batch_id;
+  const trafficTotal = Number(traffic.bytes_total) || 0;
+  const trafficState = traffic.running ? "运行中" : "上一批";
+  const trafficSub = hasTrafficBatch
+    ? trafficState + " / 上行 " + formatBytes(traffic.bytes_up) + " / 下行 " + formatBytes(traffic.bytes_down)
+      + ((Number(traffic.unmetered_proxies) || 0) > 0 ? " / 未计量 " + traffic.unmetered_proxies : "")
+    : "等待批次计量";
   const kpis = [
     ["本批成功", d.ok ?? 0, "ok", "目标 " + (d.target ?? "--")],
     ["本批失败", d.fail ?? 0, "fail", d.success_rate != null ? "成功率 " + d.success_rate + "%" : "暂无数据"],
@@ -3231,6 +3274,7 @@ function render(d) {
     ["正常 / 风控", (d.bot0 ?? 0) + " / " + (d.bot1 ?? 0), (d.bot1 ?? 0) > 0 ? "warn" : "ok", "注册结果采样"],
     ["BFS 标记", d.bfs ?? 0, (d.bfs ?? 0) > 0 ? "warn" : "ok", "JWT claim 命中"],
     ["黑名单 ASN", (d.blacklist && d.blacklist.count) ?? "--", "accent", "更新错误 " + ((d.blacklist_update && d.blacklist_update.error_count) ?? 0)],
+    ["本批代理流量", hasTrafficBatch ? formatBytes(trafficTotal) : "--", "accent", trafficSub],
     ["预计完成", d.ended ? "已完成" : (d.eta || "--"), "", "并发 " + (d.workers ?? "--") + (d.rate_per_min != null ? " / " + d.rate_per_min + " 每分钟" : "")],
   ];
   document.getElementById("kpis").innerHTML = kpis.map(([label, val, cls, sub]) =>

@@ -36,6 +36,8 @@ bulk abuse.
   and termination.
 - `static_asset_cache.py` is opt-in infrastructure. Its default-off behavior and
   request exclusions are security boundaries, not implementation details.
+- `batch_traffic.py` owns the per-batch loopback proxy meter and aggregate byte
+  state. It must never persist upstream proxy URLs, credentials, or content.
 
 ## Runtime Flows
 
@@ -155,8 +157,9 @@ stored value, explicit clear removes it, and connection tests must not mutate
 
 ## Static Cache Rules
 
-The shared cache remains disabled unless `GROK_STATIC_ASSET_CACHE=1`. Cache only
-eligible GET static resources such as scripts, styles, fonts, and images. Never
+The shared cache remains disabled unless `GROK_STATIC_ASSET_CACHE=1`; the panel
+sets that variable for jobs it launches, while direct CLI runs remain opt-in.
+Cache only eligible GET static resources such as scripts, styles, fonts, and images. Never
 cache documents, XHR/fetch, WebSockets, Turnstile/challenge traffic, responses
 with private/no-store/no-cache semantics, cookies, or per-account state. Do not
 share browser profiles, cookies, or authentication state between accounts.
@@ -167,6 +170,8 @@ share browser profiles, cookies, or authentication state between accounts.
   and `.venv/Scripts` discovery.
 - `GROK_USE_XVFB=auto` adds Xvfb only on Linux without `DISPLAY` or
   `WAYLAND_DISPLAY`. Do not add Xvfb on macOS or Windows.
+- Windows subprocess output uses a pipe-reader thread rather than
+  `selectors.DefaultSelector`, and stop paths terminate the full browser tree.
 - Linux containers must expose readable procfs at `/proc`. Process discovery
   fails closed when it cannot safely inspect the process table.
 - Stop only exact project-owned orchestration and batch processes. Never add a

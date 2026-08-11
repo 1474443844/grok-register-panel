@@ -149,6 +149,16 @@ def test_stats_refresh_persists_across_snapshot_polling():
     assert '}, { liveMerge: true });' in mon
     assert 'setInterval(() => refreshStats(false), 30000);' in mon
 
+def test_batch_traffic_metric_structure():
+    mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    assert '"traffic": traffic' in mon
+    assert 'function formatBytes(value)' in mon
+    assert '["本批代理流量"' in mon
+    assert '" / 上行 " + formatBytes(traffic.bytes_up)' in mon
+    assert '" / 下行 " + formatBytes(traffic.bytes_down)' in mon
+    assert 'GROK_STATIC_ASSET_CACHE' in mon
+    assert 'static-asset-cache' in mon
+
 def test_email_service_and_domain_rotation_panel_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
     html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
@@ -222,6 +232,7 @@ if __name__ == '__main__':
     test_compact_overview_density()
     test_help_and_faq_module()
     test_stats_refresh_persists_across_snapshot_polling()
+    test_batch_traffic_metric_structure()
     test_proxy_pool_panel_structure()
     test_email_service_and_domain_rotation_panel_structure()
     test_panel_security_and_recovery_structure()

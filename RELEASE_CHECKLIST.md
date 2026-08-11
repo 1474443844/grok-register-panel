@@ -20,6 +20,10 @@
 - [ ] Blacklist state was migrated before replacing legacy source files.
 - [ ] Pending SSO counts and recovery controls were checked without starting a job.
 - [ ] Desktop and mobile screenshots were reviewed in light and dark themes.
+- [ ] Panel-launched jobs receive `GROK_STATIC_ASSET_CACHE=1` unless explicitly disabled.
+- [ ] xAI signup precheck failure exits once without supervisor or orchestrator restart.
+- [ ] `batch_traffic.json` contains only aggregate counters and is mode `0600`.
+- [ ] Windows-targeted pipe, profile, process-tree, and cancelable-sleep tests pass.
 - [ ] The systemd service restarts cleanly and survives a service restart.
 - [ ] No registration or recovery job is active during code synchronization.
 - [ ] Geist font files ship with `LICENSES/OFL-1.1-Geist.txt`.

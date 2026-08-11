@@ -13,6 +13,7 @@ grok2api_auth/*
 !grok2api_auth/.gitkeep
 log/*
 !log/.gitkeep
+.browser-profiles/
 auth_out/
 proxies.txt
 proxies*.txt

@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from runtime_platform import batch_launch_command, popen_group_kwargs, runtime_python
+from retry_policy import PRECHECK_EXIT_CODE, orchestrator_failure_limit
 from secure_files import append_private_text, ensure_private_dir
 from webui.blacklist_store import add_asn as add_blacklist_asn
 from webui.blacklist_store import read_blacklist
@@ -124,7 +125,7 @@ def start_batch(count: int):
         fout.close()
     write_pid_file(LOG_DIR / "batch100.pid", proc.pid)
     log(f"started pid={proc.pid} count={count} workers={WORKERS} log={logname.name}")
-    return proc.pid, logname
+    return proc, logname
 
 
 def read_blocklist_asns() -> set:
@@ -290,22 +291,31 @@ def main():
     log(f"rules: workers={WORKERS} pause_on_risk_only={RISK_PAUSE} SSO ignored block={sorted(read_blocklist_asns())}")
     
     round_i = 0
+    consecutive_batch_failures = 0
+    failure_limit = orchestrator_failure_limit()
     while cpa_count() < TARGET_CPA and round_i < MAX_ROUNDS:
         round_i += 1
         need = TARGET_CPA - cpa_count()
         batch_n = min(max(need + 8, 15), 40)
         log(f"=== ROUND {round_i} need={need} batch_n={batch_n} cpa={cpa_count()} block={sorted(read_blocklist_asns())} ===")
         try:
-            pid, logpath = start_batch(batch_n)
+            proc, logpath = start_batch(batch_n)
         except Exception as e:
             log(f"start_batch failed: {e}")
+            consecutive_batch_failures += 1
+            if consecutive_batch_failures >= failure_limit:
+                log(
+                    f"ORCH STOP consecutive batch start failures="
+                    f"{consecutive_batch_failures}/{failure_limit}"
+                )
+                return
             time.sleep(5)
             continue
         t0 = time.time()
         while True:
             time.sleep(15)
             try:
-                alive = batch_alive(pid)
+                alive = proc.poll() is None and batch_alive(proc.pid)
             except Exception:
                 alive = False
             risks = count_risk(logpath)
@@ -326,7 +336,21 @@ def main():
                     log(f"  analyze error (continue anyway): {e}")
                 break
             if not alive:
-                log("  batch exited")
+                return_code = proc.poll()
+                log(f"  batch exited rc={return_code}")
+                if return_code == PRECHECK_EXIT_CODE:
+                    log("ORCH STOP xAI registration page precheck failed")
+                    return
+                if return_code not in (0, None):
+                    consecutive_batch_failures += 1
+                    if consecutive_batch_failures >= failure_limit:
+                        log(
+                            f"ORCH STOP consecutive batch failures="
+                            f"{consecutive_batch_failures}/{failure_limit}"
+                        )
+                        return
+                else:
+                    consecutive_batch_failures = 0
                 try:
                     analyze_risks_and_expand(logpath)
                 except Exception as e:

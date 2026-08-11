@@ -28,11 +28,12 @@ Based on [AaronL725/grok-register](https://github.com/AaronL725/grok-register) (
 | 风控早停 | `botFlagSource=1` + `policy=deny` 时跳过后续 OAuth，避免无效重试 |
 | **BFS 检测** | 解码 access_token / SSO JWT，检查是否含 `bfs` claim（与 botFlag 独立）；注册后自动标记，面板可批量扫描 CPA |
 | 编排器 | 多轮 batch、风控满 N 暂停、ASN 自动扩黑；规则写入 JSON 状态，不修改源码 |
-| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、账号补录和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
+| **Live 面板** | 启停、并发、再跑 N、黑名单、时段成功率、本批代理流量、账号补录和 BFS 扫描；操作 API 需 `MONITOR_TOKEN` |
 | 外部代理池 | 面板单条/批量导入、去重、探活、启停、删除；记录出口 IP、ASN、延迟和冷却状态 |
 | 邮箱域名池 | 自有域名/子域名导入、provider 绑定、连续拒绝阈值、自动拉黑、活跃数限制和手动重置 |
 | 失败恢复 | 待处理 SSO / accounts 文本补录 CPA，跳过已有账号，成功后自动出队 |
-| 可选静态缓存 | 仅复用 JS / CSS / 字体 / 图片等 GET 静态资源；默认关闭，不缓存文档、接口、WebSocket 或 Turnstile |
+| 安全静态缓存 | 面板任务默认复用 JS / CSS / 字体 / 图片等 GET 静态资源；不缓存文档、接口、WebSocket 或 Turnstile |
+| 批次流量计量 | 在现有 HTTP 代理前增加仅监听本机的临时计量层，展示本批上行、下行与总量，不保存代理地址或凭据 |
 | 安全存储 | 代理、账号、SSO、日志、auth 与运行状态默认使用 owner-only 权限 |
 
 ## 界面预览
@@ -154,7 +155,11 @@ cp config.example.json config.json
 | `BATCH_LOG` | 自动发现最新 `log/batch*.log` | 面板跟踪的日志 |
 | `BLACKLIST_STATE_FILE` | `./log/blacklist_state.json` | 运行时 ASN 黑名单状态 |
 | `GROK_BATCH_IDLE_TIMEOUT` | `360` | batch 子进程连续无输出多少秒后自动重建（最小 60 秒） |
-| `GROK_BATCH_MAX_RESTARTS` | `8` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `GROK_BATCH_MAX_RESTARTS` | `2` | 单批发生驱动崩溃或卡死时最多自动恢复次数 |
+| `GROK_BROWSER_START_ATTEMPTS` | `2` | 同一代理的 Camoufox 启动尝试次数，范围 1-4 |
+| `GROK_PROXY_BOOT_ROTATIONS` | `3` | 浏览器启动失败后最多更换的代理数，范围 0-10 |
+| `GROK_SLOT_RETRIES` | `1` | 单账号槽位软失败时的重试次数，范围 0-3 |
+| `GROK_ORCH_MAX_CONSECUTIVE_FAILURES` | `2` | 连续异常批次达到该值时停止编排，范围 1-10 |
 | `GROK_PYTHON_BIN` | 项目 `.venv` 或当前解释器 | 可选：显式指定面板启动任务所用的 Python，支持项目外共享虚拟环境 |
 | `GROK_USE_XVFB` | `auto` | `auto`：仅 Linux 无显示时启用；`1`：Linux 强制启用；`0`：直接启动 |
 | `GROK_COMPAT_PROCESS_ROOTS` | （空） | 可选：用系统路径分隔符列出旧 release 绝对目录；新面板会精确识别其在途任务，避免切版后重复启动 |
@@ -163,7 +168,7 @@ cp config.example.json config.json
 | `PROXY_RISK_COOLDOWN_SECONDS` | `1800` | 注册风控后的长冷却秒数 |
 | `EMAIL_PROVIDER_CONFIG_FILE` | `./config.json` | 面板邮箱服务配置文件；保存时保持 `0600` |
 | `EMAIL_DOMAIN_POOL_STATE_FILE` | `./log/email_domain_pool.json` | 邮箱域名池状态与规则，文件权限 `0600` |
-| `GROK_STATIC_ASSET_CACHE` | 空 | 设为 `1` 时启用可选共享静态资源缓存 |
+| `GROK_STATIC_ASSET_CACHE` | 面板任务为 `1`，CLI 为空 | 面板启动链默认启用；命令行直启可设为 `1`，显式设 `0` 可关闭 |
 | `GROK_STATIC_CACHE_DIR` | `./log/static-asset-cache` | 静态缓存目录，文件权限 `0700` |
 | `GROK_STATIC_CACHE_MAX_MB` | `1024` | 静态缓存上限（MB），最低 `32` |
 
@@ -200,9 +205,9 @@ python webui/monitor.py
 5. 打开顶部 **邮箱服务**，选择 provider、填写对应参数，保存后执行一次连接测试
 6. 需要多个自有收信域名轮换时，再展开 **域名轮换 · 高级设置** 导入域名并保存规则
 
-### 可选静态资源缓存
+### 静态资源缓存与批次流量
 
-默认注册入口不会启用静态缓存。需要在重复的浏览器批次之间复用 JS/CSS/字体/图片时，在标准启动命令上增加环境变量：
+从 Live 面板启动的单批和持续编排默认启用静态缓存。直接从命令行启动时，需要在标准命令上增加环境变量：
 
 ```bash
 GROK_STATIC_ASSET_CACHE=1 \
@@ -213,6 +218,11 @@ GROK_STATIC_CACHE_DIR="$PWD/log/static-asset-cache" \
 也可直接使用兼容入口 `run_batch_headless_static_cache.py` 或 `run_until_100_static_cache.py`。
 
 缓存只处理 GET 静态资源；文档、XHR/fetch、WebSocket、Turnstile 和账号相关请求始终直连。
+
+每个批次还会自动生成 `log/batch_traffic.json`。注册浏览器使用 HTTP/HTTPS
+代理时，项目会在原代理前启动独立的 `127.0.0.1` 计量转发器，面板据此展示
+真实上行、下行与总字节数。计量文件仅包含聚合值和批次 ID，不保存代理 URL、
+用户名、密码或请求内容；SOCKS 代理会保持原链路并标记为未计量。
 
 也可在控制台手动写入：
 

@@ -33,6 +33,8 @@ python3 -m venv .venv
 - 任务解释器优先使用项目 `.venv`，缺失时复用启动面板的 Python；外部共享虚拟环境可用 `GROK_PYTHON_BIN` 显式固定。
 - Linux 容器必须挂载 procfs 到 `/proc`。缺失时面板会拒绝启停任务并给出明确错误，避免在无法确认进程状态时重复启动。
 - Windows 已兼容 `.venv\\Scripts\\python.exe` 与面板进程管理，但浏览器批处理仍需在目标环境单独验证。
+- Windows supervisor 使用后台管道读取，不依赖仅支持 socket 的 `selectors`；停止任务时会递归结束 Camoufox 子进程树。
+- Windows 浏览器 Profile 位于当前用户的 `%LOCALAPPDATA%\\GrokRegister\\grok-register-camoufox`，避免仓库目录或共享临时目录泄露会话数据。
 
 ## 2. 配置
 
@@ -157,6 +159,17 @@ scripts/run_xvfb_batch.sh 10
 ```
 
 持续编排建议从面板启动；停止操作只会结束当前项目目录下的编排和批处理进程。
+
+面板启动的任务默认启用安全静态资源缓存，并自动把浏览器 HTTP/HTTPS 代理包在
+仅监听 `127.0.0.1` 的批次计量层后面。原代理池配置不会被覆盖；聚合流量写入
+`log/batch_traffic.json`，面板显示本批上行、下行与总量。注册页预检失败会以
+非重试退出码停止当前批次和持续编排，避免反复消耗代理流量。
+
+默认重试策略为：浏览器同代理尝试 2 次、启动失败最多换 3 个代理、单账号槽位
+重试 1 次、batch supervisor 最多恢复 2 次、连续异常批次 2 次后停止。需要调整时
+分别使用 `GROK_BROWSER_START_ATTEMPTS`、`GROK_PROXY_BOOT_ROTATIONS`、
+`GROK_SLOT_RETRIES`、`GROK_BATCH_MAX_RESTARTS` 和
+`GROK_ORCH_MAX_CONSECUTIVE_FAILURES`。
 
 ## 7. 账号补录
 
