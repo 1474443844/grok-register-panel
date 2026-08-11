@@ -673,6 +673,18 @@ def record_proxy_boot_failure(proxy: str, exc) -> None:
         pass
 
 
+def _record_proxy_precheck_failure(proxy: str, checks) -> bool:
+    for name, ok, detail in checks or []:
+        if name != _conn.XAI_SIGNUP_CHECK_NAME or ok:
+            continue
+        record_proxy_boot_failure(
+            proxy,
+            RuntimeError(f"xAI registration-page precheck failed: {detail}"),
+        )
+        return True
+    return False
+
+
 _MAIL_DIRECT_PATH_MARKERS = (
     "/admin/new_address",
     "/api/mails",
@@ -3573,6 +3585,10 @@ def run_registration_cli(count):
                 f"{redact_sensitive_log_line(detail)}"
             )
         if _conn.has_blocking_xai_failure(startup_checks):
+            _record_proxy_precheck_failure(
+                str(startup_config.get("proxy") or ""),
+                startup_checks,
+            )
             cli_log("[!] xAI 注册页预检失败，已停止当前批次；请检查或更换当前 proxy 后重试")
             try:
                 signal.signal(signal.SIGINT, _prev_sigint)

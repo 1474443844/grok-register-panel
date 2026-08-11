@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.2 - 2026-08-11
+
+### Fixed
+
+- Validate managed proxies against the actual xAI registration page, immediately retire proxies that fail the batch precheck, and require an explicit retest after network/TLS cooldowns instead of reviving stale health from an old exit IP.
+
 ## 0.4.1 - 2026-08-11
 
 ### Fixed
