@@ -21,6 +21,47 @@ from webui import process_utils
 from webui import proxy_store
 
 
+def test_compat_process_roots_require_existing_absolute_paths():
+    with tempfile.TemporaryDirectory() as temp:
+        base = Path(temp)
+        current = base / "current"
+        previous = base / "previous"
+        current.mkdir()
+        previous.mkdir()
+        roots = monitor._configured_process_roots(
+            current,
+            {
+                "GROK_COMPAT_PROCESS_ROOTS": os.pathsep.join(
+                    [str(previous), "relative-release", str(base / "missing"), str(current)]
+                )
+            },
+        )
+        assert roots == (current.resolve(), previous.resolve())
+
+
+def test_process_discovery_aggregates_explicit_release_roots():
+    previous_roots = monitor.MANAGED_PROCESS_ROOTS
+    previous_find = monitor.find_managed_processes
+    roots = (Path("/test/current"), Path("/test/previous"))
+    calls = []
+
+    def fake_find(root, script_names):
+        calls.append((root, script_names))
+        pid = 101 if root == roots[0] else 202
+        return [{"pid": pid, "pgid": pid, "etime": "00:01", "cmd": "test"}]
+
+    monitor.MANAGED_PROCESS_ROOTS = roots
+    monitor.find_managed_processes = fake_find
+    try:
+        found = monitor._find_managed_processes(("run_until_100.py",))
+    finally:
+        monitor.MANAGED_PROCESS_ROOTS = previous_roots
+        monitor.find_managed_processes = previous_find
+
+    assert [item["pid"] for item in found] == [101, 202]
+    assert [call[0] for call in calls] == list(roots)
+
+
 def request(url: str, *, token: str = "", method: str = "GET", body: bytes | None = None):
     headers = {}
     if token:
@@ -427,6 +468,8 @@ def test_start_reports_unavailable_process_table():
 
 
 if __name__ == "__main__":
+    test_compat_process_roots_require_existing_absolute_paths()
+    test_process_discovery_aggregates_explicit_release_roots()
     test_monitor_http_auth_and_headers()
     test_proxy_api_auth_mutations_and_redaction()
     test_email_domain_api_auth_and_mutations()
