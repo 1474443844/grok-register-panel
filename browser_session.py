@@ -640,14 +640,31 @@ def create_browser_options(unique_profile=True) -> dict:
     - block_webrtc=True：WebRTC IP 泄漏防护（避免真实 IP 通过 STUN 暴露）
     - 指纹由 BrowserForge 自动生成（匹配 Firefox/Camoufox 引擎）
     """
+    # GROK_HEADLESS=1 forces headless (needed on some Windows sessions where
+    # headed Camoufox dies with GPU process / SW-WR framebuffer crashes).
+    # GROK_HEADED=1 forces headed even on Windows.
+    headless_env = str(os.environ.get("GROK_HEADLESS", "") or "").strip().lower()
+    headed_env = str(os.environ.get("GROK_HEADED", "") or "").strip().lower()
+    force_headless = headless_env in {"1", "true", "yes", "on"}
+    force_headed = headed_env in {"1", "true", "yes", "on"}
+    use_headless = bool(force_headless) and not force_headed
+
     opts: dict = {
-        "headless": False,      # 反检测：有头模式（headless 更易被检测）
+        "headless": use_headless,  # default headed; set GROK_HEADLESS=1 on broken GPU sessions
         "humanize": True,       # 人类化鼠标移动 + 贝塞尔轨迹
         "geoip": True,          # 基于 IP 匹配时区 / 语言 / 经纬度
         "locale": "en-US",      # 与美西出口一致，避免 UI 语言漂移
         "block_webrtc": True,   # 防止 WebRTC 泄漏真实 IP（即使使用代理）
         "i_know_what_im_doing": True,  # 抑制 Firefox 版本伪装警告（Camoufox 引擎层伪装是预期行为）
     }
+    if use_headless or os.name == "nt":
+        # Soften GPU requirements on Windows (headed or headless).
+        opts["firefox_user_prefs"] = {
+            "gfx.webrender.all": False,
+            "gfx.webrender.software": True,
+            "layers.acceleration.disabled": True,
+            "media.hardware-video-decoding.enabled": False,
+        }
 
     # 旧格式安装兼容：传 executable_path 绕过 installed_verstr() 检查
     # 注意：不传 ff_version，让 Camoufox 自动检测版本号
