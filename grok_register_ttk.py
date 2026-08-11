@@ -660,10 +660,7 @@ def record_proxy_boot_failure(proxy: str, exc) -> None:
         pass
 
 
-_MAIL_DIRECT_MARKERS = (
-    "mail-api.example.com",
-    "hermaly.com",
-    "example.com",
+_MAIL_DIRECT_PATH_MARKERS = (
     "/admin/new_address",
     "/api/mails",
     "/api/mail/",
@@ -673,7 +670,17 @@ _MAIL_DIRECT_MARKERS = (
 
 def _url_needs_direct(url: str) -> bool:
     u = str(url or "").lower()
-    return any(m in u for m in _MAIL_DIRECT_MARKERS)
+    configured_bases = (
+        config.get("cloudflare_api_base"),
+        config.get("cloudmail_url"),
+        config.get("moemail_api_base"),
+        config.get("duckmail_api_base"),
+    )
+    for value in configured_bases:
+        base = str(value or "").strip().lower().rstrip("/")
+        if base and (u == base or u.startswith(base + "/")):
+            return True
+    return any(marker in u for marker in _MAIL_DIRECT_PATH_MARKERS)
 
 
 def _apply_mail_direct(url, request_kwargs: dict) -> dict:
@@ -749,6 +756,17 @@ def _pick_list_payload(data):
     return _pick_list(data)
 
 
+def cloudflare_randomize_subdomain_enabled() -> bool:
+    """主域易被风控时挂随机子域（需 CF Email Routing 对 *.apex catch-all）。
+
+    配置 cloudflare_randomize_subdomain：true/false，默认 true。
+    """
+    raw = config.get("cloudflare_randomize_subdomain", True)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "1").strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def cloudflare_create_temp_address(api_base, domain=""):
     selected_domain = str(domain or "").strip() or cloudflare_next_default_domain()
     return cloudflare_provider.create_temp_address(
@@ -760,7 +778,8 @@ def cloudflare_create_temp_address(api_base, domain=""):
         auth_mode=get_cloudflare_auth_mode(),
         custom_auth=get_cloudflare_custom_auth(),
         name=generate_username(10),
-        randomize_subdomain=not bool(domain),
+        # 有管理域名时也默认随机子域，避免根域被批量风控
+        randomize_subdomain=cloudflare_randomize_subdomain_enabled(),
     )
 
 
@@ -1660,9 +1679,15 @@ def get_email_and_token(api_key=None):
                     auth_mode=get_cloudflare_auth_mode(),
                     custom_auth=get_cloudflare_custom_auth(),
                     domain=managed_domain,
+                    randomize_subdomain=cloudflare_randomize_subdomain_enabled(),
                 )
-            except Exception:
-                raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
+            except Exception as fallback_exc:
+                primary_message = redact_sensitive_log_line(str(primary_exc))[:240]
+                fallback_message = redact_sensitive_log_line(str(fallback_exc))[:240]
+                raise Exception(
+                    "Cloudflare 创建邮箱失败: "
+                    f"{primary_message} | fallback: {fallback_message}"
+                ) from primary_exc
     if provider == "mailnest":
         return mailnest_buy_email(), "_"
     return duckmail_provider.create_mailbox(
@@ -2899,7 +2924,9 @@ class GrokRegisterGUI:
             return
         if self._queue_ui_call(self.log, message):
             return
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        from runtime_platform import beijing_strftime
+
+        timestamp = beijing_strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         append_session_log(line)
         print(line, flush=True)
@@ -3335,7 +3362,10 @@ class GrokRegisterGUI:
                     wlog(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                     wlog("[*] 5. 等待 sso cookie")
                     sso = wait_for_sso_cookie(
-                        log_callback=wlog, cancel_callback=self.should_stop
+                        log_callback=wlog,
+                        cancel_callback=self.should_stop,
+                        email=email,
+                        password=profile.get("password", ""),
                     )
                     ensure_sso_oauth_eligible(sso, email=email, log_callback=wlog)
                     if config.get("enable_nsfw", True):
@@ -3469,7 +3499,9 @@ class CliStopController:
 def cli_log(message):
     if not should_emit_log(message):
         return
-    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    from runtime_platform import beijing_strftime
+
+    timestamp = beijing_strftime("%H:%M:%S")
     line = f"[{timestamp}] {message}"
     append_session_log(line)
     print(line, flush=True)
@@ -3624,6 +3656,7 @@ def run_registration_cli(count):
                 retry = 0
                 worker_stop = False
                 while i < n and not controller.should_stop() and not worker_stop:
+                    email = ""
                     try:
                         open_signup_page(
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
@@ -3646,6 +3679,8 @@ def run_registration_cli(count):
                         sso = wait_for_sso_cookie(
                             log_callback=lambda m: cli_log(f"[W{wid+1}] {m}"),
                             cancel_callback=controller.should_stop,
+                            email=email,
+                            password=profile.get("password", ""),
                         )
                         ensure_sso_oauth_eligible(
                             sso,
@@ -4012,7 +4047,10 @@ def run_registration_cli(count):
                 cli_log(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                 cli_log("[*] 5. 等待 sso cookie")
                 sso = wait_for_sso_cookie(
-                    log_callback=cli_log, cancel_callback=controller.should_stop
+                    log_callback=cli_log,
+                    cancel_callback=controller.should_stop,
+                    email=email,
+                    password=profile.get("password", ""),
                 )
                 ensure_sso_oauth_eligible(sso, email=email, log_callback=cli_log)
                 if config.get("enable_nsfw", True):

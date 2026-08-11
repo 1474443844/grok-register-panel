@@ -5,18 +5,30 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfoNotFoundError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from runtime_platform import (
     RuntimePlatformError,
+    _load_beijing_timezone,
     batch_launch_command,
     batch_runtime_error,
     popen_group_kwargs,
     runtime_python,
 )
+
+
+def test_beijing_timezone_falls_back_without_system_tzdata():
+    def missing_timezone(_name):
+        raise ZoneInfoNotFoundError("missing test timezone")
+
+    fallback = _load_beijing_timezone(missing_timezone)
+    assert fallback.utcoffset(None) == timedelta(hours=8)
+    assert str(fallback) == "Asia/Shanghai"
 
 
 def _touch(path: Path) -> Path:
@@ -190,6 +202,7 @@ def test_recovery_module_can_run_from_webui_directory():
 
 
 if __name__ == "__main__":
+    test_beijing_timezone_falls_back_without_system_tzdata()
     test_runtime_python_uses_platform_virtualenv_layout()
     test_runtime_python_falls_back_to_active_interpreter()
     test_runtime_python_supports_explicit_override()

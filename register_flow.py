@@ -1849,14 +1849,35 @@ btn.focus(); btn.click(); return 'submitted';
     _raise_profile_fail()
 
 
-def wait_for_sso_cookie(timeout=10, log_callback=None, cancel_callback=None):
+def wait_for_sso_cookie(
+    timeout=20,
+    log_callback=None,
+    cancel_callback=None,
+    email=None,
+    password=None,
+):
     """等注册完成后的 sso cookie。
 
     关键：不要一看到「正在登录」就强制 page.get(grok.com)，
     那会打断 accounts.x.ai 的 redirect / Set-Cookie 链，导致 grok.com 只剩匿名 cookie。
-    策略：accounts 短 hold（~7s）→ 点继续 → 轻量跳 grok（最多 2 次）。
+
+    线上失败主因：资料提交后被甩到 sign-in?redirect=account，
+    hold 3s + 总超时 10s 就硬跳 grok.com → 只有匿名 cookie → sso_timeout。
+
+    策略（短超时 + 主动推进，不硬等）：
+      1) accounts 上短 hold 轮询 cookie（约 5s）
+      2) 落到 sign-in 立刻用 email+password 自动登录（优先于硬跳 grok）
+      3) 仍无 sso 再轻量跳 accounts?redirect=grok-com / grok（最多 1 次）
     """
-    deadline = time.time() + max(int(timeout or 10), 8)
+    # 环境可覆盖：SSO_WAIT_TIMEOUT=30
+    env_timeout = 0
+    try:
+        env_timeout = int(os.environ.get("SSO_WAIT_TIMEOUT", "0") or "0")
+    except Exception:
+        env_timeout = 0
+    base_timeout = env_timeout or int(timeout or 20)
+    # 比原 10s 略长一点即可；下限 15，避免又被压回 10
+    deadline = time.time() + max(base_timeout, 15)
     started = time.time()
     last_seen_names = set()
     last_submit_retry = 0.0
@@ -1866,13 +1887,19 @@ def wait_for_sso_cookie(timeout=10, log_callback=None, cancel_callback=None):
     last_back_click = 0.0
     last_grok_nudge = 0.0
     last_continue_click = 0.0
+    last_signin_attempt = 0.0
+    signin_attempt_count = 0
     grok_nudge_count = 0
     final_no_submit_state = ""
     final_no_submit_since = None
     final_no_submit_timeout = 8
-    # 短 hold：给 Set-Cookie 留窗口，又不拖慢成功路径
-    accounts_hold_seconds = 3
-    max_grok_nudges = 2
+    # 短 hold：给 Set-Cookie 留窗口；过早硬跳 grok 会打断登录链
+    accounts_hold_seconds = 5
+    grok_nudge_min_elapsed = 8
+    max_grok_nudges = 1
+    max_signin_attempts = 2
+    email_s = str(email or "").strip()
+    password_s = str(password or "").strip()
 
     def _current_url():
         try:
@@ -1918,11 +1945,199 @@ return t.includes('您正在登录') || t.includes('正在登录')
         except Exception:
             return False
 
-    def _click_continue_if_any():
-        """点「继续 / Continue / 前往 Grok」类按钮，推动自然 redirect。"""
+    def _url_is_sign_in(url: str) -> bool:
+        low = (url or "").lower()
+        return ("/sign-in" in low) or ("signin" in low and "signup" not in low)
+
+    def _page_has_login_password_form():
+        """仅识别「登录」密码表单，排除注册资料页的 new-password。"""
+        try:
+            return bool(
+                page.run_js(
+                    r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+// 资料页有 givenName / familyName / new-password，不能当登录页
+const profileHint = Array.from(document.querySelectorAll(
+  'input[data-testid="givenName"], input[name="givenName"], input[autocomplete="given-name"],'
+  + 'input[data-testid="familyName"], input[name="familyName"], input[autocomplete="family-name"],'
+  + 'input[autocomplete="new-password"]'
+)).some(isVisible);
+if (profileHint) return false;
+const title = ((document.body && document.body.innerText) || '').slice(0, 1200).toLowerCase();
+const looksSignup = title.includes('完成注册') || title.includes('complete your sign')
+  || title.includes('create your account') || title.includes('sign up');
+if (looksSignup) return false;
+const pwd = Array.from(document.querySelectorAll(
+  'input[type="password"], input[name="password"], input[autocomplete="current-password"]'
+)).find(isVisible);
+if (!pwd) return false;
+const auto = String(pwd.getAttribute('autocomplete') || '').toLowerCase();
+if (auto.includes('new-password')) return false;
+return true;
+                    """
+                )
+            )
+        except Exception:
+            return False
+
+    def _try_sign_in_with_credentials(reason: str) -> str:
+        """注册后落到 sign-in 时，用刚设的密码完成登录，拿 sso。返回 sso 或空串。"""
+        nonlocal signin_attempt_count, last_signin_attempt
+        if not email_s or not password_s:
+            return ""
+        if signin_attempt_count >= max_signin_attempts:
+            return ""
+        now_ts = time.time()
+        if now_ts - last_signin_attempt < 3.5:
+            return ""
+        last_signin_attempt = now_ts
+        signin_attempt_count += 1
+        if log_callback:
+            log_callback(
+                f"[*] {reason}，自动登录拿 sso"
+                f"（第 {signin_attempt_count}/{max_signin_attempts} 次）..."
+            )
+
+        # 1) 原生优先（真实键盘事件）
+        filled_email = False
+        filled_pwd = False
+        try:
+            email_cands = _native_input_candidates("email")
+            pwd_cands = _native_input_candidates("password")
+            if email_cands:
+                filled_email = _native_type_element(email_cands[0], email_s)
+            if pwd_cands:
+                filled_pwd = _native_type_element(pwd_cands[0], password_s)
+        except Exception as fill_exc:
+            if log_callback:
+                log_callback(f"[Debug] 原生填登录表单失败: {fill_exc}")
+
+        # 2) JS 兜底（React controlled inputs）
+        if not (filled_email and filled_pwd):
+            try:
+                js_state = page.run_js(
+                    r"""
+const email = String(arguments[0] || '');
+const password = String(arguments[1] || '');
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function setInputValue(input, value) {
+  if (!input) return false;
+  input.focus();
+  input.click();
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const tracker = input._valueTracker;
+  if (tracker) tracker.setValue('');
+  if (nativeSetter) nativeSetter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  input.blur();
+  return String(input.value || '').trim() === String(value || '').trim();
+}
+const emailInput = Array.from(document.querySelectorAll(
+  'input[type="email"], input[name="email"], input[autocomplete="email"], input[autocomplete="username"], input[data-testid*="email" i]'
+)).find(isVisible) || null;
+const pwdInput = Array.from(document.querySelectorAll(
+  'input[type="password"], input[name="password"], input[autocomplete="current-password"]'
+)).find(isVisible) || null;
+const okEmail = emailInput ? setInputValue(emailInput, email) : true;
+const okPwd = pwdInput ? setInputValue(pwdInput, password) : false;
+return { okEmail, okPwd, hasEmail: !!emailInput, hasPwd: !!pwdInput };
+                    """,
+                    email_s,
+                    password_s,
+                )
+                if isinstance(js_state, dict):
+                    filled_email = filled_email or bool(js_state.get("okEmail"))
+                    filled_pwd = filled_pwd or bool(js_state.get("okPwd"))
+                    if log_callback and not js_state.get("hasPwd"):
+                        log_callback("[Debug] sign-in 页未找到密码框")
+            except Exception as js_exc:
+                if log_callback:
+                    log_callback(f"[Debug] JS 填登录表单失败: {js_exc}")
+
+        if not filled_pwd:
+            if log_callback:
+                log_callback("[Debug] 自动登录：密码未写入，跳过提交")
+            return ""
+
+        # 3) 点登录 / 继续
+        clicked = _native_click_action(
+            (
+                "登录",
+                "登入",
+                "sign in",
+                "signin",
+                "log in",
+                "login",
+                "continue",
+                "继续",
+                "next",
+                "下一步",
+            ),
+            deny_keywords=("sign up", "注册", "create", "google", "apple", "github", "sso"),
+        )
+        if not clicked:
+            try:
+                clicked = page.run_js(
+                    r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+const nodes = Array.from(document.querySelectorAll('button[type="submit"], button, [role="button"], input[type="submit"]'));
+const btn = nodes.find((n) => {
+  if (!isVisible(n) || n.disabled) return false;
+  const t = ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).replace(/\s+/g, ' ').trim().toLowerCase();
+  const compact = t.replace(/\s+/g, '');
+  if (compact.includes('signup') || compact.includes('注册') || t.includes('google') || t.includes('apple')) return false;
+  return compact.includes('登录') || compact.includes('登入') || t.includes('sign in') || t.includes('log in')
+    || compact.includes('继续') || t.includes('continue') || t.includes('next') || n.type === 'submit';
+});
+if (!btn) return '';
+btn.focus(); btn.click();
+return (btn.innerText || btn.textContent || 'submit').trim().slice(0, 40);
+                    """
+                ) or ""
+            except Exception:
+                clicked = ""
+        if clicked and log_callback:
+            log_callback(f"[*] 自动登录已点击: {clicked}")
+        # 短轮询几次，不硬睡
+        for _ in range(4):
+            sleep_with_cancel(0.35, cancel_callback)
+            sso_val, names = _read_sso_from_cookies()
+            last_seen_names.update(names)
+            if sso_val:
+                return sso_val
+        return ""
+
+    def _click_continue_if_any(strict: bool = False):
+        """点「继续 / 前往 Grok」类按钮，推动自然 redirect。
+
+        strict=True 时只点明确的「前往 Grok / Go to Grok / 开始使用」，
+        避免在 sign-up 残留页误点通用 Continue 把链打断到 sign-in。
+        """
         try:
             return page.run_js(
                 r"""
+const strict = !!arguments[0];
 function isVisible(node) {
   if (!node) return false;
   const style = window.getComputedStyle(node);
@@ -1938,14 +2153,18 @@ const btn = nodes.find((n) => {
     + (n.getAttribute('href') || '')).replace(/\s+/g, ' ').trim().toLowerCase();
   const compact = t.replace(/\s+/g, '');
   if (compact.includes('返回') || t.includes('back') || t.includes('return')) return false;
-  return compact.includes('继续') || compact.includes('前往') || compact.includes('打开')
-    || t.includes('continue') || t.includes('proceed') || t.includes('go to')
-    || t.includes('grok.com') || compact.includes('开始使用');
+  if (compact.includes('signup') || compact.includes('注册') || t.includes('create account')) return false;
+  const goGrok = compact.includes('前往') || compact.includes('打开') || t.includes('go to')
+    || t.includes('grok.com') || compact.includes('开始使用') || t.includes('open grok');
+  if (goGrok) return true;
+  if (strict) return false;
+  return compact.includes('继续') || t.includes('continue') || t.includes('proceed');
 });
 if (!btn) return false;
 btn.click();
 return true;
-                """
+                """,
+                bool(strict),
             )
         except Exception:
             return False
@@ -1980,15 +2199,23 @@ return true;
         nonlocal grok_nudge_count, last_grok_nudge
         if grok_nudge_count >= max_grok_nudges:
             return ""
+        # 优先走带 redirect 的 accounts 入口，比直接 grok.com 更不容易丢会话
+        targets = (
+            "https://accounts.x.ai/sign-in?redirect=grok-com",
+            "https://grok.com/",
+        )
+        target = targets[min(grok_nudge_count, len(targets) - 1)]
         if log_callback:
-            log_callback(f"[*] {reason}，轻量打开 grok.com（第 {grok_nudge_count + 1}/{max_grok_nudges} 次）...")
+            log_callback(
+                f"[*] {reason}，轻量打开 {target}（第 {grok_nudge_count + 1}/{max_grok_nudges} 次）..."
+            )
         try:
-            page.get("https://grok.com/")
+            page.get(target)
             try:
                 page.wait.doc_loaded()
             except Exception:
                 pass
-            sleep_with_cancel(1.0, cancel_callback)
+            sleep_with_cancel(0.6, cancel_callback)
             grok_nudge_count += 1
             last_grok_nudge = time.time()
             sso_val, names = _read_sso_from_cookies()
@@ -1998,7 +2225,7 @@ return true;
             grok_nudge_count += 1
             last_grok_nudge = time.time()
             if log_callback:
-                log_callback(f"[Debug] 跳转 grok.com 取 sso 失败: {nav_exc}")
+                log_callback(f"[Debug] 跳转取 sso 失败: {nav_exc}")
             return ""
 
     while time.time() < deadline:
@@ -2014,9 +2241,17 @@ return true;
             cur_url = _current_url()
             on_accounts = ("accounts.x.ai" in cur_url) or ("auth.x.ai" in cur_url)
             on_grok = "grok.com" in cur_url
+            on_sign_in = _url_is_sign_in(cur_url)
+            # 只在真正 sign-in URL、或明确登录密码表单时才自动登录
+            # （注册资料页也有 password 框，旧逻辑会误判成登录并打断 SSO 链）
+            has_login_form = False
+            if on_sign_in:
+                has_login_form = True
+            elif on_accounts and not on_sign_in:
+                has_login_form = _page_has_login_password_form()
 
-            # 心跳：避免长时间无日志像卡死
-            if log_callback and now - last_heartbeat >= 5:
+            # 心跳：避免长时间无日志像卡死（2.5s 一次，不硬等）
+            if log_callback and now - last_heartbeat >= 2.5:
                 last_heartbeat = now
                 remain = max(int(deadline - now), 0)
                 log_callback(
@@ -2033,30 +2268,68 @@ return true;
 
             signin_hint = _page_is_signing_in()
 
-            # 阶段1：accounts 上「正在登录」→ 短 hold，禁止立刻跳 grok
+            # 阶段0：真正落到 sign-in / 登录表单 → 用注册密码自动登录
+            if has_login_form and email_s and password_s:
+                if not signin_hint:
+                    sso_val = _try_sign_in_with_credentials("注册后落到登录页")
+                    if sso_val:
+                        if log_callback:
+                            log_callback("[*] 已获取到 sso cookie")
+                        return sso_val
+                    # 登录已点，下一轮继续读 cookie（不硬睡）
+                    sleep_with_cancel(0.35, cancel_callback)
+                    continue
+
+            # 阶段1：accounts 上「正在登录」→ 短 hold 轮询，不立刻跳 grok
             if signin_hint and on_accounts and elapsed < accounts_hold_seconds:
-                if log_callback and now - last_signin_log >= 3:
+                if log_callback and now - last_signin_log >= 2.5:
                     last_signin_log = now
                     remain_hold = max(int(accounts_hold_seconds - elapsed), 0)
                     log_callback(
-                        f"[*] 页面显示正在登录，先在 accounts.x.ai 等待 sso"
-                        f"（再等 {remain_hold}s 后可跳 grok.com）..."
+                        f"[*] 页面显示正在登录，先在 accounts.x.ai 等 sso"
+                        f"（再等 {remain_hold}s）..."
                     )
-                # hold 过半后再点「继续」，避免过早打断
-                if elapsed >= 3 and now - last_continue_click >= 4:
+                # hold 过半后只点「前往 Grok」类明确按钮，避免误点通用 Continue
+                if elapsed >= 2.5 and now - last_continue_click >= 3:
                     last_continue_click = now
-                    if _click_continue_if_any() and log_callback:
-                        log_callback("[*] 已点击继续/前往类按钮，等待 redirect...")
-                sleep_with_cancel(0.4, cancel_callback)
+                    if _click_continue_if_any(strict=True) and log_callback:
+                        log_callback("[*] 已点击前往 Grok 类按钮，等待 redirect...")
+                sleep_with_cancel(0.3, cancel_callback)
                 continue
 
-            # 阶段2：hold 结束仍在 accounts 且无 sso → 先点继续，再轻量跳 grok（最多 2 次）
+            # 阶段2：hold 结束仍在 accounts 且无 sso → 主动推进，不空等
             if on_accounts and elapsed >= accounts_hold_seconds:
-                if now - last_continue_click >= 5:
+                # 仍在 sign-in / 登录表单：立刻自动登录，不要硬跳 grok
+                if has_login_form:
+                    if email_s and password_s and not signin_hint:
+                        sso_val = _try_sign_in_with_credentials("accounts 登录页仍无 sso")
+                        if sso_val:
+                            if log_callback:
+                                log_callback("[*] 已获取到 sso cookie")
+                            return sso_val
+                    sleep_with_cancel(0.4, cancel_callback)
+                    # 登录试过仍无 sso，再轻量跳（最后手段）
+                    if (
+                        elapsed >= grok_nudge_min_elapsed + 4
+                        and grok_nudge_count < max_grok_nudges
+                        and now - last_grok_nudge >= 6
+                        and signin_attempt_count >= 1
+                    ):
+                        sso_val = _nudge_grok_once("sign-in 自动登录仍无 sso")
+                        if sso_val:
+                            if log_callback:
+                                log_callback("[*] 已获取到 sso cookie")
+                            return sso_val
+                    continue
+
+                # 非 sign-in：先点明确「前往」；稍后再允许通用 continue
+                if now - last_continue_click >= 3.5:
                     last_continue_click = now
-                    if _click_continue_if_any() and log_callback:
-                        log_callback("[*] accounts 等待结束，已点击继续/前往类按钮...")
-                        sleep_with_cancel(1.2, cancel_callback)
+                    strict = elapsed < accounts_hold_seconds + 4
+                    if _click_continue_if_any(strict=strict) and log_callback:
+                        kind = "前往 Grok" if strict else "继续/前往"
+                        log_callback(f"[*] accounts 等待结束，已点击{kind}类按钮...")
+                        sleep_with_cancel(0.8, cancel_callback)
                         sso_val, names = _read_sso_from_cookies()
                         last_seen_names |= names
                         if sso_val:
@@ -2065,8 +2338,8 @@ return true;
                             return sso_val
                 if (
                     grok_nudge_count < max_grok_nudges
-                    and now - last_grok_nudge >= 8
-                    and (signin_hint or elapsed >= accounts_hold_seconds + 2)
+                    and elapsed >= grok_nudge_min_elapsed
+                    and now - last_grok_nudge >= 6
                 ):
                     sso_val = _nudge_grok_once("accounts 等待结束仍无 sso")
                     if sso_val:
@@ -2074,18 +2347,40 @@ return true;
                             log_callback("[*] 已获取到 sso cookie")
                         return sso_val
 
-            # 阶段3：已在 grok.com 仍无 sso → 少次「返回」或再刷（不反复硬刷）
+            # 阶段3：已在 grok.com 仍无 sso → 回 accounts 登录重建，不空刷
             if on_grok and not sso_val:
-                if signin_hint and now - last_back_click >= 10:
+                if signin_hint and now - last_back_click >= 6:
                     last_back_click = now
                     if _click_back_if_any():
                         if log_callback:
                             log_callback("[*] grok 页无 sso，已点击「返回」尝试重新推进")
-                        sleep_with_cancel(0.8, cancel_callback)
+                        sleep_with_cancel(0.6, cancel_callback)
+                elif (
+                    email_s
+                    and password_s
+                    and signin_attempt_count < max_signin_attempts
+                    and elapsed >= 5
+                    and now - last_signin_attempt >= 5
+                ):
+                    # 匿名 grok 会话：回 accounts 登录页用密码建会话
+                    if log_callback:
+                        log_callback("[*] grok.com 匿名会话，回 accounts 登录页重建 sso...")
+                    try:
+                        page.get(
+                            "https://accounts.x.ai/sign-in?redirect=grok-com"
+                        )
+                        try:
+                            page.wait.doc_loaded()
+                        except Exception:
+                            pass
+                        sleep_with_cancel(0.6, cancel_callback)
+                    except Exception as nav_exc:
+                        if log_callback:
+                            log_callback(f"[Debug] 回 accounts 登录失败: {nav_exc}")
                 elif (
                     grok_nudge_count < max_grok_nudges
-                    and elapsed >= accounts_hold_seconds + 12
-                    and now - last_grok_nudge >= 10
+                    and elapsed >= grok_nudge_min_elapsed + 4
+                    and now - last_grok_nudge >= 6
                 ):
                     sso_val = _nudge_grok_once("grok.com 仍为匿名会话")
                     if sso_val:
