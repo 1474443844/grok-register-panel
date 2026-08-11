@@ -112,6 +112,49 @@ FONT_ASSETS = {
 MONITOR_TOKEN_ENV = "MONITOR_TOKEN"
 PANEL_INCLUDE_TAIL = os.environ.get("PANEL_INCLUDE_TAIL", "0").strip() in ("1", "true", "yes")
 
+
+def _configured_process_roots(
+    current_root: Path = ROOT,
+    environ=None,
+) -> tuple[Path, ...]:
+    """Return exact project roots allowed for cross-release process discovery."""
+    env = os.environ if environ is None else environ
+    roots = [Path(current_root).resolve()]
+    raw = str(env.get("GROK_COMPAT_PROCESS_ROOTS", "") or "").strip()
+    for item in raw.split(os.pathsep):
+        value = item.strip()
+        if not value:
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+MANAGED_PROCESS_ROOTS = _configured_process_roots()
+
+
+def _find_managed_processes(script_names) -> list[dict]:
+    found = {}
+    for root in MANAGED_PROCESS_ROOTS:
+        for item in find_managed_processes(root, script_names):
+            found[int(item["pid"])] = item
+    return sorted(found.values(), key=lambda item: int(item["pid"]))
+
+
+def _terminate_managed_processes(script_names) -> list[int]:
+    killed = set()
+    for root in MANAGED_PROCESS_ROOTS:
+        killed.update(terminate_managed_processes(root, script_names))
+    return sorted(killed)
+
+
 BASE_FILE = LOG_DIR / "batch1000.base"
 ORCH_PID = LOG_DIR / "orch100.pid"
 BATCH_PID = LOG_DIR / "batch100.pid"
@@ -247,8 +290,8 @@ def process_running():
         "batch_pid": None,
         "batch_etime": None,
     }
-    orch = find_managed_processes(ROOT, ("run_until_100.py",))
-    batch = find_managed_processes(ROOT, ("run_batch_headless.py",))
+    orch = _find_managed_processes(("run_until_100.py",))
+    batch = _find_managed_processes(("run_batch_headless.py",))
 
     def primary(items):
         if not items:
@@ -608,9 +651,8 @@ def _parse_etime(s):
 
 def kill_all():
     """Stop only orchestrator and batch processes under this project root."""
-    killed = terminate_managed_processes(
-        ROOT,
-        ("run_until_100.py", "run_batch_headless.py"),
+    killed = _terminate_managed_processes(
+        ("run_until_100.py", "run_batch_headless.py")
     )
     return {"ok": True, "killed": killed}
 
@@ -630,7 +672,7 @@ def _start_orch_unlocked():
     proc = process_running()
     if proc.get("orch_running") or proc.get("batch_running"):
         return {"ok": False, "error": "already running", "process": proc}
-    if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
+    if _find_managed_processes(("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:
@@ -707,7 +749,7 @@ def _start_batch_only_unlocked():
     proc = process_running()
     if proc.get("batch_running") or proc.get("orch_running"):
         return {"ok": False, "error": "already running", "process": proc}
-    if find_managed_processes(ROOT, ("sso_to_auth_json.py",)):
+    if _find_managed_processes(("sso_to_auth_json.py",)):
         return {"ok": False, "error": "account recovery is running"}
     prerequisite_error = _runtime_prerequisite_error()
     if prerequisite_error:

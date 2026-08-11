@@ -171,6 +171,9 @@ share browser profiles, cookies, or authentication state between accounts.
   fails closed when it cannot safely inspect the process table.
 - Stop only exact project-owned orchestration and batch processes. Never add a
   fuzzy global kill pattern.
+- During a release-directory switch, `GROK_COMPAT_PROCESS_ROOTS` may list
+  explicit previous release roots so the new panel still detects in-flight
+  jobs. New jobs must continue to launch from the current project root.
 
 ## Pull Request And Release Checklist
 

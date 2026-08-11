@@ -92,6 +92,8 @@ export CPA_AUTH_DIR="$PWD/cpa_auth"
 # export GROK_PYTHON_BIN=/opt/grok-runtime/bin/python
 # 可选：auto / 1 / 0；默认 auto
 # export GROK_USE_XVFB=auto
+# 可选：切换 release 时继续识别旧目录中尚未结束的精确任务进程
+# export GROK_COMPAT_PROCESS_ROOTS=/opt/grok-register-panel-release-previous
 # 可选：覆盖代理池状态位置与冷却时间
 # export PROXY_POOL_STATE_FILE="$PWD/log/proxy_pool.json"
 # export PROXY_NETWORK_COOLDOWN_SECONDS=90
