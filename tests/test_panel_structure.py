@@ -79,6 +79,8 @@ def test_compact_overview_density():
 def test_help_and_faq_module():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
     html = mon.split('HTML = r"""', 1)[1].split('"""', 1)[0]
+    assert 'html {\n    overflow-x: clip;' in html
+    assert 'body {\n    overflow-x: clip;' in html
     assert 'id="dashboard-view"' in html
     assert 'id="help-view"' in html
     assert 'id="help-view-toggle"' in html
@@ -139,11 +141,13 @@ def test_proxy_pool_panel_structure():
 
 def test_stats_refresh_persists_across_snapshot_polling():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
-    assert 'let fullStats = null;' in mon
-    assert 'fullStats = j;' in mon
-    assert 'function statsForSnapshot(d)' in mon
-    assert 'return Object.assign({}, fullStats, liveStats' in mon
-    assert 'renderStats(statsForSnapshot(d));' in mon
+    assert 'let lastFullStats = null;' in mon
+    assert 'lastFullStats = Object.assign({}, lastFullStats || {}, j || {});' in mon
+    assert 'function renderStats(s, opts)' in mon
+    assert 'if (opts.liveMerge && lastFullStats)' in mon
+    assert 'renderStats({' in mon
+    assert '}, { liveMerge: true });' in mon
+    assert 'setInterval(() => refreshStats(false), 30000);' in mon
 
 def test_email_service_and_domain_rotation_panel_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')

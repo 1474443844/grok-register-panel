@@ -9,11 +9,13 @@ tests=(
   tests/test_security_utils.py
   tests/test_extract_code.py
   tests/test_moemail.py
+  tests/test_cloudflare_provider.py
   tests/test_runtime_security.py
   tests/test_runtime_platform.py
   tests/test_sso_recovery.py
   tests/test_bfs_detect.py
   tests/test_bfs_ops.py
+  tests/test_bfs_worker_integration.py
   tests/test_static_asset_cache.py
   tests/test_monitor_http.py
   tests/test_proxy_store.py

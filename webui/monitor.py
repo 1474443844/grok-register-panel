@@ -22,6 +22,8 @@ from secure_files import atomic_write_json, ensure_private_dir
 from runtime_platform import (
     batch_launch_command,
     batch_runtime_error,
+    beijing_strftime,
+    now_beijing,
     popen_group_kwargs,
     runtime_python,
 )
@@ -371,8 +373,9 @@ def parse_log(path, max_tail=400_000):
         "fail_kinds": fail_kinds,
         "worker_ok": worker_ok,
         "worker_fail": worker_fail,
-        "recent_ok": recent_ok[-25:][::-1],
-        "recent_fail": recent_fail[-25:][::-1],
+        # 前端分页每页 10 条；后端多留一些供翻页
+        "recent_ok": recent_ok[-80:][::-1],
+        "recent_fail": recent_fail[-80:][::-1],
         "tail": [redact_log_line(line) for line in last_lines],
     }
 
@@ -445,6 +448,7 @@ def blacklist_update_errors():
 def success_stats():
     """Aggregate success stats: CPA + jsonl + time-window rates + latest batch."""
     from datetime import datetime, timezone, timedelta
+    from runtime_platform import TZ_BEIJING
 
     cpa = cpa_count()
     configured_base = read_base()
@@ -456,11 +460,17 @@ def success_stats():
     by_day = {}
     results = LOG_DIR / "register_results.jsonl"
 
-    # windows in hours -> counters
+    # windows in hours -> counters（按北京时间窗口）
     windows_h = (1, 3, 12)
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     win = {
-        h: {"ok": 0, "fail": 0, "risk": 0, "total": 0, "since": (now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        h: {
+            "ok": 0,
+            "fail": 0,
+            "risk": 0,
+            "total": 0,
+            "since": (now - timedelta(hours=h)).strftime("%Y-%m-%d %H:%M:%S"),
+        }
         for h in windows_h
     }
 
@@ -474,7 +484,7 @@ def success_stats():
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
+            return dt.astimezone(TZ_BEIJING)
         except Exception:
             return None
 
@@ -492,7 +502,9 @@ def success_stats():
                     except Exception:
                         continue
                     st = o.get("status")
-                    day = (o.get("ts") or "")[:10]
+                    dt = _parse_ts(o.get("ts") or "")
+                    # 按日统计用北京日期
+                    day = dt.strftime("%Y-%m-%d") if dt else (o.get("ts") or "")[:10]
                     if day:
                         by_day.setdefault(day, {"ok": 0, "risk": 0, "fail": 0})
                     if st == "ok":
@@ -508,7 +520,6 @@ def success_stats():
                         if day:
                             by_day[day]["fail"] += 1
 
-                    dt = _parse_ts(o.get("ts") or "")
                     if not dt:
                         continue
                     age = now - dt
@@ -562,7 +573,7 @@ def success_stats():
         "batch_log": parsed.get("log_name"),
         "by_day": by_day,
         "rates": rates,
-        "refreshed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "refreshed_at": beijing_strftime("%Y-%m-%d %H:%M:%S"),
     }
     try:
         _write_json(STATS_CACHE, data)
@@ -780,7 +791,7 @@ def snapshot():
     workers_show = parsed.get("workers") or control.get("workers")
     return {
         "ts": time.time(),
-        "ts_human": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts_human": beijing_strftime("%Y-%m-%d %H:%M:%S"),
         "base_cpa": base,
         "base_cpa_stale": base_stale,
         "cpa": cpa,
@@ -896,10 +907,12 @@ HTML = r"""<!DOCTYPE html>
     border: 0;
   }
   html {
+    overflow-x: clip;
     background: var(--bg);
     transition: background-color 180ms ease, color 180ms ease;
   }
   body {
+    overflow-x: clip;
     margin: 0;
     min-height: 100dvh;
     background-color: var(--bg);
@@ -1025,6 +1038,22 @@ HTML = r"""<!DOCTYPE html>
     margin-bottom: 14px;
   }
   .section-meta { color: var(--muted); font-size: 12px; text-align: right; }
+  .list-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+  .list-pager .pager-info { color: var(--muted); font-size: 12px; }
+  .list-pager .pager-btns { display: flex; gap: 6px; align-items: center; }
+  .list-pager button {
+    min-height: 30px;
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .list-pager button:disabled { opacity: .4; cursor: not-allowed; }
   .control-grid {
     display: grid;
     grid-template-columns: minmax(220px, 1.6fr) minmax(150px, .9fr) repeat(4, minmax(100px, .55fr)) minmax(258px, auto);
@@ -2191,12 +2220,32 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div class="two panel-gap">
     <div class="card">
-      <div class="section-head"><h2>最近成功</h2></div>
+      <div class="section-head">
+        <h2>最近成功</h2>
+        <span class="section-meta" id="ok-page-meta"></span>
+      </div>
       <div class="table-scroll"><table><thead><tr><th>时间</th><th>W</th><th>邮箱</th></tr></thead><tbody id="ok-body"></tbody></table></div>
+      <div class="list-pager" id="ok-pager">
+        <span class="pager-info" id="ok-pager-info"></span>
+        <div class="pager-btns">
+          <button type="button" id="ok-prev" aria-label="上一页">上一页</button>
+          <button type="button" id="ok-next" aria-label="下一页">下一页</button>
+        </div>
+      </div>
     </div>
     <div class="card">
-      <div class="section-head"><h2>最近失败</h2></div>
+      <div class="section-head">
+        <h2>最近失败</h2>
+        <span class="section-meta" id="fail-page-meta"></span>
+      </div>
       <div class="table-scroll"><table><thead><tr><th>时间</th><th>W</th><th>类型</th><th>摘要</th></tr></thead><tbody id="fail-body"></tbody></table></div>
+      <div class="list-pager" id="fail-pager">
+        <span class="pager-info" id="fail-pager-info"></span>
+        <div class="pager-btns">
+          <button type="button" id="fail-prev" aria-label="上一页">上一页</button>
+          <button type="button" id="fail-next" aria-label="下一页">下一页</button>
+        </div>
+      </div>
     </div>
   </div>
   <section class="card panel">
@@ -2207,7 +2256,6 @@ HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 let last = null;
-let fullStats = null;
 let proxyData = null;
 let domainData = null;
 let emailProviderData = null;
@@ -2216,6 +2264,13 @@ const clearedEmailSecrets = new Set();
 const THEME_KEY = "GROK_REGISTER_THEME";
 const APP_VIEW_KEY = "GROK_REGISTER_APP_VIEW";
 const HELP_TAB_KEY = "GROK_REGISTER_HELP_TAB";
+const LIST_PAGE_SIZE = 10;
+let okPage = 1;
+let failPage = 1;
+let okRowsCache = [];
+let failRowsCache = [];
+// 完整成功统计（jsonl / by_day）；2s 轮询只更新本批数字，不能冲掉
+let lastFullStats = null;
 function syncThemeButtons() {
   const theme = document.documentElement.dataset.theme || "light";
   document.querySelectorAll("[data-theme-choice]").forEach(button => {
@@ -2418,7 +2473,15 @@ function proxyTime(value) {
   if (!value) return "--";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  // 统一北京时间展示（服务器可能是 UTC）
+  return date.toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 function cooldownText(item) {
   const seconds = Number(item.cooldown_remaining_seconds || 0);
@@ -2615,7 +2678,14 @@ function renderEmailProviderConfig(data) {
     : (providers[0] && providers[0].id || "");
   const updated = emailProviderData.mtime ? new Date(emailProviderData.mtime * 1000) : null;
   document.getElementById("mail-provider-updated").textContent = updated && !Number.isNaN(updated.getTime())
-    ? ("config.json " + updated.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }))
+    ? ("config.json " + updated.toLocaleString("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }))
     : "config.json 尚未创建";
   renderEmailProviderFields(provider);
 }
@@ -2894,8 +2964,9 @@ async function refreshBlacklist() {
 async function refreshStats(authHelp = true) {
   try {
     const j = await api("/api/stats?_=" + Date.now(), { authHelp });
-    fullStats = j;
-    renderStats(fullStats);
+    // 完整统计入库；后续 2s 快照只合并本批字段
+    lastFullStats = Object.assign({}, lastFullStats || {}, j || {});
+    renderStats(lastFullStats);
     setMsg("stats-msg", "统计已刷新 " + (j.refreshed_at || ""), "ok");
   } catch (e) { setMsg("stats-msg", String(e.message || e), "err"); }
 }
@@ -3046,42 +3117,48 @@ function renderRates(rates) {
   if (el) el.innerHTML = cards.join("");
 }
 
-function renderStats(s) {
+function renderStats(s, opts) {
+  opts = opts || {};
   s = s || {};
+  // 快照轻量更新：只覆盖本批/CPA，保留 jsonl / by_day / rates
+  if (opts.liveMerge && lastFullStats) {
+    s = Object.assign({}, lastFullStats, {
+      cpa: s.cpa != null ? s.cpa : lastFullStats.cpa,
+      cpa_delta: s.cpa_delta != null ? s.cpa_delta : lastFullStats.cpa_delta,
+      base_cpa: s.base_cpa != null ? s.base_cpa : lastFullStats.base_cpa,
+      batch_ok: s.batch_ok != null ? s.batch_ok : lastFullStats.batch_ok,
+      batch_fail: s.batch_fail != null ? s.batch_fail : lastFullStats.batch_fail,
+      // rates 以快照里的为准（snapshot 已算），否则沿用缓存
+      rates: (s.rates && Object.keys(s.rates).length) ? s.rates : lastFullStats.rates,
+    });
+  } else if (!opts.liveMerge && s && (typeof s.jsonl_ok === "number" || (s.by_day && Object.keys(s.by_day).length))) {
+    lastFullStats = Object.assign({}, lastFullStats || {}, s);
+  }
   if (s.rates) renderRates(s.rates);
+  const jsonlOk = (typeof s.jsonl_ok === "number") ? s.jsonl_ok : (lastFullStats && lastFullStats.jsonl_ok);
+  const jsonlRisk = (typeof s.jsonl_risk === "number") ? s.jsonl_risk : (lastFullStats && lastFullStats.jsonl_risk);
   document.getElementById("stats-chips").innerHTML = [
     ["CPA", s.cpa ?? "--", "accent"],
     ["CPA 变化", s.cpa_delta ?? "--", "ok"],
     ["本批成功", s.batch_ok ?? 0, "ok"],
     ["本批失败", s.batch_fail ?? 0, "fail"],
-    ["jsonl ok", s.jsonl_ok ?? 0, "ok"],
-    ["jsonl risk", s.jsonl_risk ?? 0, "warn"],
+    ["jsonl ok", jsonlOk != null ? jsonlOk : "--", "ok"],
+    ["jsonl risk", jsonlRisk != null ? jsonlRisk : "--", "warn"],
   ].map(([l,v,c]) => `<div class="chip"><span>${esc(l)}</span><b class="${c}">${esc(v)}</b></div>`).join("");
-  const days = Object.entries(s.by_day || {}).sort((a,b) => b[0].localeCompare(a[0])).slice(0, 10);
+  const byDay = (s.by_day && Object.keys(s.by_day).length)
+    ? s.by_day
+    : ((lastFullStats && lastFullStats.by_day) || {});
+  const days = Object.entries(byDay).sort((a,b) => b[0].localeCompare(a[0])).slice(0, 10);
   document.getElementById("stats-day").innerHTML = days.length ? days.map(([d, v]) =>
     `<tr><td class="mono">${esc(d)}</td><td class="ok">${v.ok||0}</td><td class="warn">${v.risk||0}</td><td class="fail">${v.fail||0}</td></tr>`
   ).join("") : '<tr><td colspan="4" style="color:var(--muted)">无 jsonl 数据</td></tr>';
-}
-function statsForSnapshot(d) {
-  const liveStats = {
-    cpa: d.cpa,
-    cpa_delta: d.cpa_delta,
-    base_cpa: d.base_cpa,
-    batch_ok: d.ok,
-    batch_fail: d.fail,
-    rates: d.rates || {},
-  };
-  if (!fullStats) {
-    return Object.assign({}, liveStats, {
-      jsonl_ok: "--",
-      jsonl_risk: "--",
-      by_day: {},
-      refreshed_at: d.ts_human,
-    });
+  // 保留「统计已刷新」文案，不被 2s 轮询清掉
+  if (!opts.liveMerge && s.refreshed_at) {
+    const el = document.getElementById("stats-msg");
+    if (el && !String(el.textContent || "").includes("失败")) {
+      /* refreshed via setMsg in refreshStats */
+    }
   }
-  return Object.assign({}, fullStats, liveStats, {
-    rates: d.rates || fullStats.rates || {},
-  });
 }
 function render(d) {
   document.getElementById("clock").textContent = d.ts_human || "--";
@@ -3129,8 +3206,15 @@ function render(d) {
     + (d.ended ? " / 结束：成功 " + d.ended.success + "，失败 " + d.ended.fail : "");
 
   renderBlacklist(d.blacklist, d.blacklist_update);
-  // Keep full jsonl/day statistics while the 2-second snapshot updates live counters.
-  renderStats(statsForSnapshot(d));
+  // 2s 快照：只更新本批/CPA，绝不清空 jsonl / 按日表
+  renderStats({
+    cpa: d.cpa,
+    cpa_delta: d.cpa_delta,
+    base_cpa: d.base_cpa,
+    batch_ok: d.ok,
+    batch_fail: d.fail,
+    rates: d.rates || {},
+  }, { liveMerge: true });
 
   const wset = new Set([...(Object.keys(d.worker_ok || {})), ...(Object.keys(d.worker_fail || {}))]);
   const ws = [...wset].sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
@@ -3141,25 +3225,98 @@ function render(d) {
   document.getElementById("fails").innerHTML = fk.length ? fk.map(([k, v]) =>
     `<div class="chip"><span>${esc(k)}</span><b class="fail">${v}</b></div>`
   ).join("") : '<span style="color:var(--muted)">暂无失败</span>';
-  document.getElementById("ok-body").innerHTML = (d.recent_ok || []).map(r =>
-    `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td class="mono">${esc(r.email)}</td></tr>`
-  ).join("") || '<tr><td colspan="3" style="color:var(--muted)">暂无记录</td></tr>';
-  document.getElementById("fail-body").innerHTML = (d.recent_fail || []).map(r =>
-    `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td>${esc(r.kind)}</td><td class="mono">${esc(r.msg)}</td></tr>`
-  ).join("") || '<tr><td colspan="4" style="color:var(--muted)">暂无记录</td></tr>';
+  okRowsCache = Array.isArray(d.recent_ok) ? d.recent_ok.slice() : [];
+  failRowsCache = Array.isArray(d.recent_fail) ? d.recent_fail.slice() : [];
+  // 新数据到来时，若当前页越界则收回最后一页；用户正在翻页时尽量保留页码
+  renderOkPage();
+  renderFailPage();
   document.getElementById("tail").textContent = (d.tail || []).join("\n");
   document.getElementById("footer").textContent =
     "服务 " + location.host + " / 日志 " + (d.log || "") + " / 2 秒轮询 / "
     + (d.log_size ? (d.log_size / 1024).toFixed(0) + " KB" : "0 KB")
     + " / 黑名单 " + ((d.blacklist && d.blacklist.count) || 0) + " ASN";
 }
+
+function listPageCount(total) {
+  return Math.max(1, Math.ceil(Math.max(0, total) / LIST_PAGE_SIZE));
+}
+
+function clampPage(page, total) {
+  const pages = listPageCount(total);
+  let p = Math.max(1, parseInt(page, 10) || 1);
+  if (p > pages) p = pages;
+  return p;
+}
+
+function renderOkPage() {
+  const rows = okRowsCache || [];
+  okPage = clampPage(okPage, rows.length);
+  const pages = listPageCount(rows.length);
+  const start = (okPage - 1) * LIST_PAGE_SIZE;
+  const slice = rows.slice(start, start + LIST_PAGE_SIZE);
+  document.getElementById("ok-body").innerHTML = slice.length
+    ? slice.map(r =>
+      `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td class="mono">${esc(r.email)}</td></tr>`
+    ).join("")
+    : '<tr><td colspan="3" style="color:var(--muted)">暂无记录</td></tr>';
+  const meta = rows.length
+    ? `共 ${rows.length} 条 · 第 ${okPage}/${pages} 页`
+    : "共 0 条";
+  document.getElementById("ok-page-meta").textContent = meta;
+  document.getElementById("ok-pager-info").textContent = rows.length
+    ? `每页 ${LIST_PAGE_SIZE} 条`
+    : "";
+  document.getElementById("ok-prev").disabled = okPage <= 1 || !rows.length;
+  document.getElementById("ok-next").disabled = okPage >= pages || !rows.length;
+}
+
+function renderFailPage() {
+  const rows = failRowsCache || [];
+  failPage = clampPage(failPage, rows.length);
+  const pages = listPageCount(rows.length);
+  const start = (failPage - 1) * LIST_PAGE_SIZE;
+  const slice = rows.slice(start, start + LIST_PAGE_SIZE);
+  document.getElementById("fail-body").innerHTML = slice.length
+    ? slice.map(r =>
+      `<tr><td class="mono">${esc(r.t)}</td><td>${esc(r.w)}</td><td>${esc(r.kind)}</td><td class="mono">${esc(r.msg)}</td></tr>`
+    ).join("")
+    : '<tr><td colspan="4" style="color:var(--muted)">暂无记录</td></tr>';
+  const meta = rows.length
+    ? `共 ${rows.length} 条 · 第 ${failPage}/${pages} 页`
+    : "共 0 条";
+  document.getElementById("fail-page-meta").textContent = meta;
+  document.getElementById("fail-pager-info").textContent = rows.length
+    ? `每页 ${LIST_PAGE_SIZE} 条`
+    : "";
+  document.getElementById("fail-prev").disabled = failPage <= 1 || !rows.length;
+  document.getElementById("fail-next").disabled = failPage >= pages || !rows.length;
+}
+
+document.getElementById("ok-prev").addEventListener("click", () => {
+  okPage = Math.max(1, okPage - 1);
+  renderOkPage();
+});
+document.getElementById("ok-next").addEventListener("click", () => {
+  okPage += 1;
+  renderOkPage();
+});
+document.getElementById("fail-prev").addEventListener("click", () => {
+  failPage = Math.max(1, failPage - 1);
+  renderFailPage();
+});
+document.getElementById("fail-next").addEventListener("click", () => {
+  failPage += 1;
+  renderFailPage();
+});
+
 syncThemeButtons();
 initHelp();
 loadTokenField();
 refresh();
 setInterval(refresh, 2000);
-// full stats once on load
+// 完整成功统计：启动拉一次，之后每 30s 刷新（避免 2s 轮询冲掉）
 refreshStats(false);
+setInterval(() => refreshStats(false), 30000);
 refreshRecovery();
 setInterval(refreshRecovery, 5000);
 refreshBfs();

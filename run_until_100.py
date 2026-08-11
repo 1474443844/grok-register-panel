@@ -83,7 +83,9 @@ ensure_private_dir(LOG_DIR)
 
 
 def log(msg: str) -> None:
-    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    from runtime_platform import beijing_strftime
+
+    line = f"[{beijing_strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
     append_private_text(ORCH_LOG, line + "\n")
 

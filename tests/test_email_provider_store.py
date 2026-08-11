@@ -57,6 +57,16 @@ def test_provider_schema_and_defaults():
         }
         assert providers["duckmail"]["configured"] is True
         assert providers["cloudmail"]["configured"] is False
+        random_subdomain = next(
+            field
+            for field in providers["cloudflare"]["fields"]
+            if field["name"] == "cloudflare_randomize_subdomain"
+        )
+        assert random_subdomain["default"] == "true"
+        assert {item["value"] for item in random_subdomain["options"]} == {
+            "true",
+            "false",
+        }
         assert any(
             field["name"] == "cloudmail_password" and field["secret"] is True
             for field in providers["cloudmail"]["fields"]

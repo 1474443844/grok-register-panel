@@ -128,6 +128,7 @@ cp config.example.json config.json
 | `email_provider` | `cloudflare` / `duckmail` / `yyds` / `mailnest` / `cloudmail` / `moemail` |
 | `defaultDomains` | 临时邮域名（如二级 CF 域） |
 | `cloudflare_*` / `duckmail_*` 等 | 对应邮箱 API |
+| `cloudflare_randomize_subdomain` | 默认 `true`；为管理域名生成随机子域，要求泛域收信；不支持时设为 `false` |
 | `moemail_api_base` | MoeMail 站点根 URL，例如 `https://mail.example.com` |
 | `moemail_api_key` | MoeMail OpenAPI 的 `X-API-Key` |
 | `moemail_domain` | 可选固定域名；留空时自动读取 `/api/config` 的可用域名 |
