@@ -46,6 +46,7 @@ import browser_session as _bs
 import register_flow as _rf
 import connectivity as _conn
 from batch_supervisor import mark_slot_completed
+from batch_traffic import mark_successful_account
 from retry_policy import proxy_boot_rotations, slot_retries
 from secure_files import (
     append_private_text,
@@ -3751,6 +3752,7 @@ def run_registration_cli(count):
                             sso, email=email, log_callback=lambda m: cli_log(f"[W{wid+1}] {m}")
                         )
                         local_success += 1
+                        mark_successful_account()
                         i += 1
                         retry = 0
                         if cpa_ok:
@@ -4115,6 +4117,7 @@ def run_registration_cli(count):
                     raise RuntimeError(f"保存账号文件失败: {file_exc}") from file_exc
                 cpa_ok = add_sso_to_cpa(sso, email=email, log_callback=cli_log)
                 success_count += 1
+                mark_successful_account()
                 retry_count_for_slot = 0
                 i += 1
                 if cpa_ok:

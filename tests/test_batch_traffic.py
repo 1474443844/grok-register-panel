@@ -117,6 +117,8 @@ def test_http_connect_metering_and_private_state():
             assert client.recv(4) == b"pong"
             client.close()
 
+            batch_traffic.mark_successful_account(2)
+            assert batch_traffic.read_metrics(path)["successful_accounts"] == 2
             finalized = batch_traffic.finalize_batch(path, "batch-a", 0)
             time.sleep(0.7)
             metrics = batch_traffic.read_metrics(path)
@@ -127,6 +129,7 @@ def test_http_connect_metering_and_private_state():
             assert metrics["bytes_down"] > 0
             assert metrics["bytes_total"] == metrics["bytes_up"] + metrics["bytes_down"]
             assert metrics["metered_proxies"] == 1
+            assert metrics["successful_accounts"] == 2
             state_text = path.read_text(encoding="utf-8")
             assert "example-user" not in state_text
             assert "example-pass" not in state_text
@@ -142,6 +145,7 @@ def test_http_connect_metering_and_private_state():
             assert reset["batch_id"] == "batch-b"
             assert reset["bytes_total"] == 0
             assert reset["connections"] == 0
+            assert reset["successful_accounts"] == 0
     finally:
         batch_traffic.close_runtime()
         upstream.shutdown()
@@ -157,6 +161,68 @@ def test_http_connect_metering_and_private_state():
             os.environ[batch_traffic.BATCH_ID_ENV] = previous_id
 
 
+def test_batch_history_is_private_idempotent_and_summarized():
+    with tempfile.TemporaryDirectory() as temp:
+        history_path = Path(temp) / "log" / "batch_traffic_history.json"
+        first = {
+            "batch_id": "batch-a",
+            "started_at": "malformed timestamp",
+            "bytes_up": 300,
+            "bytes_down": 700,
+            "successful_accounts": 2,
+            "target": 3,
+            "workers": 1,
+            "exit_code": 0,
+        }
+        assert batch_traffic.archive_batch(history_path, first)
+        assert batch_traffic.archive_batch(history_path, first)
+        assert stat.S_IMODE(history_path.stat().st_mode) == 0o600
+
+        second = {
+            "batch_id": "batch-b",
+            "started_at": 20,
+            "finished_at": 30,
+            "bytes_up": 1_000,
+            "bytes_down": 2_000,
+            "successful_accounts": 3,
+            "target": 4,
+            "workers": 2,
+            "exit_code": 0,
+        }
+        assert batch_traffic.archive_batch(history_path, second)
+        history = batch_traffic.read_history(history_path)
+        assert len(history["batches"]) == 2
+
+        current = {
+            "batch_id": "batch-c",
+            "started_at": 40,
+            "bytes_up": 500,
+            "bytes_down": 500,
+            "successful_accounts": 1,
+        }
+        summary = batch_traffic.read_summary(history_path, current)
+        assert summary == {
+            "batch_count": 3,
+            "completed_batch_count": 2,
+            "includes_current": True,
+            "total_bytes": 5_000,
+            "successful_accounts": 6,
+            "bytes_per_batch": 1_666,
+            "bytes_per_success": 833,
+        }
+
+        archived_summary = batch_traffic.read_summary(history_path, second)
+        assert archived_summary["batch_count"] == 2
+        assert archived_summary["includes_current"] is False
+
+        assert not batch_traffic.archive_batch(
+            history_path,
+            {"batch_id": "zero-byte", "successful_accounts": 1},
+        )
+        assert len(batch_traffic.read_history(history_path)["batches"]) == 2
+
+
 if __name__ == "__main__":
     test_http_connect_metering_and_private_state()
+    test_batch_history_is_private_idempotent_and_summarized()
     print("OK batch traffic")

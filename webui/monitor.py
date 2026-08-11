@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from secure_files import atomic_write_json, best_effort_fchmod, ensure_private_dir
 from batch_traffic import read_metrics as read_batch_traffic
+from batch_traffic import read_summary as read_batch_traffic_summary
 from runtime_platform import (
     batch_launch_command,
     batch_runtime_error,
@@ -105,6 +106,7 @@ except ImportError:  # running as script from webui/
     )
 LOG_DIR = ROOT / "log"
 BATCH_TRAFFIC = LOG_DIR / "batch_traffic.json"
+BATCH_TRAFFIC_HISTORY = LOG_DIR / "batch_traffic_history.json"
 CPA_DIR = Path(os.environ.get("CPA_AUTH_DIR", str(ROOT / "cpa_auth")))
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 FONT_ASSETS = {
@@ -842,6 +844,12 @@ def snapshot():
     traffic = read_batch_traffic(BATCH_TRAFFIC)
     if traffic.get("running") and not proc.get("running"):
         traffic["running"] = False
+    if int(traffic.get("version") or 0) < 2:
+        traffic["successful_accounts"] = max(
+            int(traffic.get("successful_accounts") or 0),
+            int(parsed.get("ok") or 0),
+        )
+    traffic_summary = read_batch_traffic_summary(BATCH_TRAFFIC_HISTORY, traffic)
     return {
         "ts": time.time(),
         "ts_human": beijing_strftime("%Y-%m-%d %H:%M:%S"),
@@ -858,6 +866,7 @@ def snapshot():
         "rate_per_min": rate_per_min,
         "eta": eta,
         "traffic": traffic,
+        "traffic_summary": traffic_summary,
         "blacklist": {
             "count": bl.get("count"),
             "asns": bl.get("asns"),
@@ -3261,6 +3270,16 @@ function render(d) {
     ? trafficState + " / 上行 " + formatBytes(traffic.bytes_up) + " / 下行 " + formatBytes(traffic.bytes_down)
       + ((Number(traffic.unmetered_proxies) || 0) > 0 ? " / 未计量 " + traffic.unmetered_proxies : "")
     : "等待批次计量";
+  const trafficSummary = d.traffic_summary || {};
+  const trafficBatchCount = Number(trafficSummary.batch_count) || 0;
+  const trafficSuccessCount = Number(trafficSummary.successful_accounts) || 0;
+  const trafficAverageSub = trafficBatchCount
+    ? trafficBatchCount + " 批样本 / 累计 " + formatBytes(trafficSummary.total_bytes)
+      + (trafficSummary.includes_current ? " / 含本批" : "")
+    : "等待批次样本";
+  const trafficSuccessSub = trafficSuccessCount
+    ? "累计成功 " + trafficSuccessCount + " / 含失败流量"
+    : "等待成功账号样本";
   const kpis = [
     ["本批成功", d.ok ?? 0, "ok", "目标 " + (d.target ?? "--")],
     ["本批失败", d.fail ?? 0, "fail", d.success_rate != null ? "成功率 " + d.success_rate + "%" : "暂无数据"],
@@ -3270,6 +3289,8 @@ function render(d) {
     ["黑名单 ASN", (d.blacklist && d.blacklist.count) ?? "--", "accent", "更新错误 " + ((d.blacklist_update && d.blacklist_update.error_count) ?? 0)],
     ["本批代理流量", hasTrafficBatch ? formatBytes(trafficTotal) : "--", "accent", trafficSub],
     ["预计完成", d.ended ? "已完成" : (d.eta || "--"), "", "并发 " + (d.workers ?? "--") + (d.rate_per_min != null ? " / " + d.rate_per_min + " 每分钟" : "")],
+    ["每批平均流量", trafficSummary.bytes_per_batch != null ? formatBytes(trafficSummary.bytes_per_batch) : "--", "accent", trafficAverageSub],
+    ["每个成功号平均流量", trafficSummary.bytes_per_success != null ? formatBytes(trafficSummary.bytes_per_success) : "--", "ok", trafficSuccessSub],
   ];
   document.getElementById("kpis").innerHTML = kpis.map(([label, val, cls, sub]) =>
     `<div class="metric"><div class="label">${esc(label)}</div><div class="value ${cls}">${esc(val)}</div><div class="sub">${esc(sub)}</div></div>`

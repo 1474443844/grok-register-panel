@@ -17,12 +17,15 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from secure_files import atomic_write_json, ensure_private_dir
+from secure_files import atomic_write_json, ensure_private_dir, exclusive_file_lock
 
 
 TRAFFIC_FILE_ENV = "GROK_BATCH_TRAFFIC_FILE"
+HISTORY_FILE_ENV = "GROK_BATCH_TRAFFIC_HISTORY_FILE"
 BATCH_ID_ENV = "GROK_BATCH_ID"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+HISTORY_SCHEMA_VERSION = 1
+HISTORY_LIMIT = 500
 HEADER_LIMIT = 64 * 1024
 
 
@@ -43,6 +46,7 @@ def _empty_metrics() -> dict:
         "unmetered_proxies": 0,
         "target": 0,
         "workers": 0,
+        "successful_accounts": 0,
         "exit_code": None,
     }
 
@@ -67,6 +71,7 @@ def read_metrics(path: str | os.PathLike[str]) -> dict:
         "unmetered_proxies",
         "target",
         "workers",
+        "successful_accounts",
     ):
         try:
             metrics[key] = max(0, int(metrics.get(key, 0) or 0))
@@ -76,6 +81,130 @@ def read_metrics(path: str | os.PathLike[str]) -> dict:
     metrics["batch_id"] = str(metrics.get("batch_id") or "")[:96]
     metrics["running"] = bool(metrics.get("running"))
     return metrics
+
+
+def _empty_history() -> dict:
+    return {"version": HISTORY_SCHEMA_VERSION, "batches": []}
+
+
+def _history_entry(raw: object) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    batch_id = str(raw.get("batch_id") or "")[:96]
+    if not batch_id:
+        return None
+    entry = {
+        "batch_id": batch_id,
+        "started_at": raw.get("started_at"),
+        "finished_at": raw.get("finished_at"),
+        "bytes_up": 0,
+        "bytes_down": 0,
+        "bytes_total": 0,
+        "successful_accounts": 0,
+        "target": 0,
+        "workers": 0,
+        "exit_code": raw.get("exit_code"),
+    }
+    for key in (
+        "bytes_up",
+        "bytes_down",
+        "successful_accounts",
+        "target",
+        "workers",
+    ):
+        try:
+            entry[key] = max(0, int(raw.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            entry[key] = 0
+    entry["bytes_total"] = entry["bytes_up"] + entry["bytes_down"]
+    try:
+        entry["exit_code"] = int(entry["exit_code"])
+    except (TypeError, ValueError):
+        entry["exit_code"] = None
+    return entry
+
+
+def read_history(path: str | os.PathLike[str]) -> dict:
+    history = _empty_history()
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return history
+    if not isinstance(raw, dict) or not isinstance(raw.get("batches"), list):
+        return history
+    history["batches"] = [
+        entry
+        for item in raw["batches"][-HISTORY_LIMIT:]
+        if (entry := _history_entry(item)) is not None
+    ]
+    return history
+
+
+def _history_sort_key(entry: dict) -> float:
+    try:
+        return float(entry.get("finished_at") or entry.get("started_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def archive_batch(path: str | os.PathLike[str], metrics: object) -> bool:
+    entry = _history_entry(metrics)
+    if entry is None or entry["bytes_total"] <= 0:
+        return False
+    target = Path(path)
+    ensure_private_dir(target.parent)
+    with exclusive_file_lock(target.with_suffix(target.suffix + ".lock")):
+        history = read_history(target)
+        batches = [
+            item
+            for item in history["batches"]
+            if item.get("batch_id") != entry["batch_id"]
+        ]
+        batches.append(entry)
+        batches.sort(key=_history_sort_key)
+        history["batches"] = batches[-HISTORY_LIMIT:]
+        atomic_write_json(target, history)
+    return True
+
+
+def summarize_history(history: object, current: object | None = None) -> dict:
+    stored = history if isinstance(history, dict) else _empty_history()
+    entries = [
+        entry
+        for raw in (stored.get("batches") or [])
+        if (entry := _history_entry(raw)) is not None and entry["bytes_total"] > 0
+    ]
+    archived_ids = {entry["batch_id"] for entry in entries}
+    includes_current = False
+    current_entry = _history_entry(current)
+    if (
+        current_entry is not None
+        and current_entry["bytes_total"] > 0
+        and current_entry["batch_id"] not in archived_ids
+    ):
+        entries.append(current_entry)
+        includes_current = True
+    total_bytes = sum(entry["bytes_total"] for entry in entries)
+    successful_accounts = sum(entry["successful_accounts"] for entry in entries)
+    batch_count = len(entries)
+    return {
+        "batch_count": batch_count,
+        "completed_batch_count": batch_count - int(includes_current),
+        "includes_current": includes_current,
+        "total_bytes": total_bytes,
+        "successful_accounts": successful_accounts,
+        "bytes_per_batch": total_bytes // batch_count if batch_count else None,
+        "bytes_per_success": (
+            total_bytes // successful_accounts if successful_accounts else None
+        ),
+    }
+
+
+def read_summary(
+    history_path: str | os.PathLike[str],
+    current: object | None = None,
+) -> dict:
+    return summarize_history(read_history(history_path), current)
 
 
 def initialize_batch(
@@ -404,6 +533,14 @@ def meter_proxy_url(upstream_url: str) -> str:
         return manager.wrap(str(upstream_url).strip())
     except (OSError, ValueError):
         return upstream_url
+
+
+def mark_successful_account(count: int = 1) -> None:
+    manager = _runtime_manager()
+    if manager is None:
+        return
+    manager.state.update(successful_accounts=max(0, int(count)))
+    manager.state.flush()
 
 
 def close_runtime(

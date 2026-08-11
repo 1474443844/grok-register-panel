@@ -151,11 +151,19 @@ def test_stats_refresh_persists_across_snapshot_polling():
 
 def test_batch_traffic_metric_structure():
     mon = (ROOT / 'webui/monitor.py').read_text(encoding='utf-8')
+    runner = (ROOT / 'run_batch_headless.py').read_text(encoding='utf-8')
     assert '"traffic": traffic' in mon
+    assert '"traffic_summary": traffic_summary' in mon
+    assert 'if int(traffic.get("version") or 0) < 2:' in mon
     assert 'function formatBytes(value)' in mon
     assert '["本批代理流量"' in mon
+    assert '["每批平均流量"' in mon
+    assert '["每个成功号平均流量"' in mon
+    assert 'trafficSummary.bytes_per_batch' in mon
+    assert 'trafficSummary.bytes_per_success' in mon
     assert '" / 上行 " + formatBytes(traffic.bytes_up)' in mon
     assert '" / 下行 " + formatBytes(traffic.bytes_down)' in mon
+    assert 'archive_batch(history_file, finalized)' in runner
     assert 'GROK_STATIC_ASSET_CACHE' in mon
     assert 'static-asset-cache' in mon
 

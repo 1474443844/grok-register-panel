@@ -100,6 +100,9 @@ def test_monitor_http_auth_and_headers():
         assert "process" in status_payload
         assert "traffic" in status_payload
         assert "bytes_up" in status_payload["traffic"]
+        assert "traffic_summary" in status_payload
+        assert "bytes_per_batch" in status_payload["traffic_summary"]
+        assert "bytes_per_success" in status_payload["traffic_summary"]
 
         status, _, _ = request(base + "/api/recovery")
         assert status == 401

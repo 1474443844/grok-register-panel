@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Persist owner-only batch traffic history and show rolling average traffic per batch and per successful account in the live panel.
+
 ## 0.4.2 - 2026-08-11
 
 ### Fixed

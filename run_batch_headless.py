@@ -17,7 +17,9 @@ from batch_supervisor import (
 )
 from batch_traffic import (
     BATCH_ID_ENV,
+    HISTORY_FILE_ENV,
     TRAFFIC_FILE_ENV,
+    archive_batch,
     finalize_batch,
     initialize_batch,
 )
@@ -185,6 +187,12 @@ def main(argv: list[str] | None = None) -> int:
     traffic_file = Path(
         str(os.environ.get(TRAFFIC_FILE_ENV, "") or LOG_DIR / "batch_traffic.json")
     ).resolve()
+    history_file = Path(
+        str(
+            os.environ.get(HISTORY_FILE_ENV, "")
+            or LOG_DIR / "batch_traffic_history.json"
+        )
+    ).resolve()
     initialize_batch(
         traffic_file,
         batch_id,
@@ -208,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return result
     finally:
-        finalize_batch(traffic_file, batch_id, result)
+        finalized = finalize_batch(traffic_file, batch_id, result)
+        if finalized.get("batch_id") == batch_id:
+            archive_batch(history_file, finalized)
 
 
 if __name__ == "__main__":
